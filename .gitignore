@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Environment
+.env
+local.settings.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+ui/dist/
+ui/build/
+*.tsbuildinfo
+
+# Azure Functions
+bin/
+obj/
+.python_packages/
+
+# Markdown (except README)
+*.md
+!README.md
+
+# Misc
+*.log
+.pytest_cache/
+coverage/
+htmlcov/

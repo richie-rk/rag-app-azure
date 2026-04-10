@@ -1,0 +1,117 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
+import { useIsAuthenticated, useMsal } from "@azure/msal-react";
+import { InteractionStatus } from "@azure/msal-browser";
+import { loginRequest } from "./msal-config";
+import { fetchUserProfile, type UserProfile } from "./graph-service";
+import { apiClient } from "../api/client";
+
+interface AuthState {
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  user: UserProfile | null;
+  token: string | null;
+  role: string;
+  login: () => void;
+  logout: () => void;
+}
+
+const AuthContext = createContext<AuthState>({
+  isAuthenticated: false,
+  isLoading: true,
+  user: null,
+  token: null,
+  role: "user",
+  login: () => {},
+  logout: () => {},
+});
+
+export function useAuth() {
+  return useContext(AuthContext);
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const { instance, accounts, inProgress } = useMsal();
+  const isMsalAuthenticated = useIsAuthenticated();
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [role, setRole] = useState("user");
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Check for magic link token in localStorage
+  const magicToken = localStorage.getItem("rag_auth_token");
+  const isAuthenticated = isMsalAuthenticated || !!magicToken;
+
+  useEffect(() => {
+    async function initAuth() {
+      if (isMsalAuthenticated && accounts.length > 0) {
+        try {
+          const response = await instance.acquireTokenSilent({
+            ...loginRequest,
+            account: accounts[0],
+          });
+          const accessToken = response.accessToken;
+
+          const profile = await fetchUserProfile(accessToken);
+          setUser(profile);
+
+          // Provision user on backend
+          const result = await apiClient("/users/provision", {
+            method: "POST",
+            body: JSON.stringify({
+              email: profile.mail,
+              display_name: profile.displayName,
+              auth_type: "sso",
+            }),
+            token: accessToken,
+          });
+          setToken(accessToken);
+          setRole(result.role || "user");
+        } catch (err) {
+          console.error("Auth init failed:", err);
+        }
+      } else if (magicToken) {
+        try {
+          const payload = JSON.parse(atob(magicToken.split(".")[1]));
+          setUser({ displayName: payload.display_name, mail: payload.sub, id: "" });
+          setToken(magicToken);
+          setRole(payload.role || "guest");
+        } catch {
+          localStorage.removeItem("rag_auth_token");
+        }
+      }
+      setIsLoading(false);
+    }
+
+    if (inProgress === InteractionStatus.None) {
+      initAuth();
+    }
+  }, [isMsalAuthenticated, accounts, inProgress, instance, magicToken]);
+
+  const login = useCallback(() => {
+    instance.loginRedirect(loginRequest);
+  }, [instance]);
+
+  const logout = useCallback(() => {
+    localStorage.removeItem("rag_auth_token");
+    if (isMsalAuthenticated) {
+      instance.logoutRedirect();
+    } else {
+      window.location.href = "/login";
+    }
+  }, [instance, isMsalAuthenticated]);
+
+  return (
+    <AuthContext.Provider
+      value={{ isAuthenticated, isLoading, user, token, role, login, logout }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+}

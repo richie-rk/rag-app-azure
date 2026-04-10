@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+openai==1.58.1
+azure-search-documents==11.6.0b8
+azure-storage-blob==12.24.0
+azure-data-tables==12.6.0
+azure-core==1.32.0
+pydantic==2.10.3
+pydantic-settings==2.7.0
+PyJWT==2.10.1
+sqlalchemy==2.0.36
+pyodbc==5.2.0
