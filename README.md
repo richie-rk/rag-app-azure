@@ -148,7 +148,7 @@ graph TB
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-org/rag-app-azure.git
+   git clone https://github.com/richie-rk/rag-app-azure.git
    cd rag-app-azure
    ```
 

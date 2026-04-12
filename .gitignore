@@ -37,6 +37,10 @@ obj/
 *.md
 !README.md
 
+# Provisioning
+infra/.suffix
+.azure/
+
 # Misc
 *.log
 .pytest_cache/
