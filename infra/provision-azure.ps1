@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Provisions ALL Azure resources for rag-app-azure from scratch.
@@ -28,14 +28,23 @@ $ErrorActionPreference = "Continue"
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 $PROJECT_PREFIX    = "ragapp"                    # Used to derive all resource names
-$LOCATION          = "eastus2"                   # Primary region
-$OPENAI_LOCATION   = "eastus2"                   # May differ — check model availability
+$LOCATION          = "eastus"                    # For OpenAI + AI Search
+$OPENAI_LOCATION   = "eastus"                    # May differ — check model availability
+$COMPUTE_LOCATION  = "centralindia"              # For SQL, App Service, Web Apps
+$FUNC_LOCATION     = "eastus2"                   # For Function Apps (Linux consumption)
 $RESOURCE_GROUP    = "$PROJECT_PREFIX-rg"
 $SQL_ADMIN_USER    = "ragappadmin"
 $SQL_DB_NAME       = "ragappdb"
 
 # Derived names (Azure naming constraints: lowercase, no special chars, globally unique)
-$UNIQUE_SUFFIX     = (Get-Random -Minimum 1000 -Maximum 9999).ToString()
+# Reuse suffix from prior runs for idempotency; delete infra/.suffix to start fresh
+$suffixFile = Join-Path $PSScriptRoot ".suffix"
+if (Test-Path $suffixFile) {
+    $UNIQUE_SUFFIX = (Get-Content $suffixFile).Trim()
+} else {
+    $UNIQUE_SUFFIX = (Get-Random -Minimum 1000 -Maximum 9999).ToString()
+    Set-Content -Path $suffixFile -Value $UNIQUE_SUFFIX
+}
 $STORAGE_ACCOUNT   = "${PROJECT_PREFIX}store${UNIQUE_SUFFIX}"
 $SQL_SERVER        = "${PROJECT_PREFIX}-sql-${UNIQUE_SUFFIX}"
 $SEARCH_SERVICE    = "${PROJECT_PREFIX}-search-${UNIQUE_SUFFIX}"
@@ -119,16 +128,36 @@ if ($LASTEXITCODE -ne 0) {
 Write-Status "Logged in as: $($account.user.name)" "Green"
 Write-Status "Subscription: $($account.name) ($($account.id))" "Green"
 
-# Prompt for SQL password
-Write-Host ""
-$sqlPasswordSecure = Read-Host -Prompt "  Enter SQL admin password (min 8 chars, mixed case + number)" -AsSecureString
-$sqlPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sqlPasswordSecure)
-)
-
-if ($sqlPassword.Length -lt 8) {
-    Write-Status "Password must be at least 8 characters." "Red"
-    exit 1
+# Only prompt for SQL password if SQL server doesn't exist yet
+$sqlPassword = $null
+$sqlCheck = az sql server show --name $SQL_SERVER --resource-group $RESOURCE_GROUP --output json 2>$null
+if (-not $sqlCheck) {
+    Write-Host ""
+    $sqlPasswordSecure = Read-Host -Prompt "  Enter SQL admin password (min 8 chars, mixed case + number)" -AsSecureString
+    $sqlPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sqlPasswordSecure)
+    )
+    if ($sqlPassword.Length -lt 8) {
+        Write-Status "Password must be at least 8 characters." "Red"
+        exit 1
+    }
+} else {
+    Write-Status "SQL Server already exists — skipping password prompt" "Green"
+    # Read password from existing .env for DATABASE_URL generation
+    $envFile = Join-Path (Split-Path $PSScriptRoot -Parent) ".env"
+    if (Test-Path $envFile) {
+        $dbLine = Get-Content $envFile | Where-Object { $_ -match "^DATABASE_URL=" }
+        if ($dbLine -match "://[^:]+:([^@]+)@") {
+            $sqlPassword = [Uri]::UnescapeDataString($Matches[1])
+        }
+    }
+    if (-not $sqlPassword) {
+        Write-Host ""
+        $sqlPasswordSecure = Read-Host -Prompt "  Enter existing SQL admin password (for .env generation)" -AsSecureString
+        $sqlPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sqlPasswordSecure)
+        )
+    }
 }
 
 # Generate JWT secret
@@ -147,8 +176,8 @@ try {
 Write-Host ""
 Write-Host "  Resource naming prefix : $PROJECT_PREFIX" -ForegroundColor White
 Write-Host "  Unique suffix          : $UNIQUE_SUFFIX" -ForegroundColor White
-Write-Host "  Location               : $LOCATION" -ForegroundColor White
-Write-Host "  OpenAI location        : $OPENAI_LOCATION" -ForegroundColor White
+Write-Host "  Compute location       : $COMPUTE_LOCATION" -ForegroundColor White
+Write-Host "  OpenAI/Search location : $OPENAI_LOCATION" -ForegroundColor White
 Write-Host ""
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -157,16 +186,34 @@ Write-Host ""
 
 Write-Section "1/10  Resource Group"
 
+# If RG is mid-deletion from a prior teardown, wait for it to finish
+$rgState = az group show --name $RESOURCE_GROUP --query properties.provisioningState --output tsv 2>$null
+if ($rgState -eq "Deleting") {
+    Write-Status "$RESOURCE_GROUP is being deleted — waiting (this may take a few minutes)..." "Yellow"
+    az group wait --name $RESOURCE_GROUP --deleted --timeout 600 2>$null
+    Write-Status "Previous resource group deleted" "Green"
+}
+
 $rgExists = az group exists --name $RESOURCE_GROUP 2>$null
 if ($rgExists -eq "true") {
     Write-Status "$RESOURCE_GROUP already exists" "Yellow"
 } else {
-    az group create --name $RESOURCE_GROUP --location $LOCATION --output none 2>$null
+    $rgError = az group create --name $RESOURCE_GROUP --location $COMPUTE_LOCATION --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$RESOURCE_GROUP created" "Green"
     } else {
-        Write-Status "Failed to create resource group" "Red"
+        $errText = ($rgError | Out-String).Trim()
+        Write-Status "Failed to create resource group — cannot continue" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
+        exit 1
     }
+}
+
+# Verify RG is usable before proceeding
+$rgVerify = az group show --name $RESOURCE_GROUP --query properties.provisioningState --output tsv 2>$null
+if ($rgVerify -ne "Succeeded") {
+    Write-Status "Resource group not ready (state: $rgVerify) — wait and re-run" "Red"
+    exit 1
 }
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -179,18 +226,20 @@ $storageCheck = az storage account show --name $STORAGE_ACCOUNT --resource-group
 if ($storageCheck) {
     Write-Status "$STORAGE_ACCOUNT already exists" "Yellow"
 } else {
-    az storage account create `
+    $storeError = az storage account create `
         --name $STORAGE_ACCOUNT `
         --resource-group $RESOURCE_GROUP `
         --location $LOCATION `
         --sku Standard_LRS `
         --kind StorageV2 `
         --min-tls-version TLS1_2 `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$STORAGE_ACCOUNT created (Standard_LRS)" "Green"
     } else {
+        $errText = ($storeError | Out-String).Trim()
         Write-Status "Failed to create storage account" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
     }
 }
 
@@ -244,77 +293,94 @@ $sqlCheck = az sql server show --name $SQL_SERVER --resource-group $RESOURCE_GRO
 if ($sqlCheck) {
     Write-Status "SQL Server $SQL_SERVER already exists" "Yellow"
 } else {
-    az sql server create `
+    $sqlError = az sql server create `
         --name $SQL_SERVER `
         --resource-group $RESOURCE_GROUP `
-        --location $LOCATION `
+        --location $COMPUTE_LOCATION `
         --admin-user $SQL_ADMIN_USER `
         --admin-password $sqlPassword `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "SQL Server $SQL_SERVER created" "Green"
+        Write-Status "SQL Server $SQL_SERVER created in $COMPUTE_LOCATION" "Green"
     } else {
+        $errText = ($sqlError | Out-String).Trim()
         Write-Status "Failed to create SQL Server" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
     }
 }
 
-# Firewall: allow Azure services
-Write-Status "Configuring firewall rules..." "Cyan"
-az sql server firewall-rule create `
-    --server $SQL_SERVER `
-    --resource-group $RESOURCE_GROUP `
-    --name "AllowAzureServices" `
-    --start-ip-address 0.0.0.0 `
-    --end-ip-address 0.0.0.0 `
-    --output none 2>$null
-Write-Status "Firewall rule: Azure services allowed" "Green"
-
-if ($devIp) {
+# Check SQL server actually exists before configuring firewall & database
+$sqlServerReady = az sql server show --name $SQL_SERVER --resource-group $RESOURCE_GROUP --output json 2>$null
+if ($sqlServerReady) {
+    # Firewall: allow Azure services
+    Write-Status "Configuring firewall rules..." "Cyan"
     az sql server firewall-rule create `
         --server $SQL_SERVER `
         --resource-group $RESOURCE_GROUP `
-        --name "AllowDeveloperIP" `
-        --start-ip-address $devIp `
-        --end-ip-address $devIp `
-        --output none 2>$null
-    Write-Status "Firewall rule: Developer IP $devIp allowed" "Green"
-}
-
-# Database (free tier)
-$dbCheck = az sql db show --name $SQL_DB_NAME --server $SQL_SERVER --resource-group $RESOURCE_GROUP --output json 2>$null
-if ($dbCheck) {
-    Write-Status "Database $SQL_DB_NAME already exists" "Yellow"
-} else {
-    az sql db create `
-        --name $SQL_DB_NAME `
-        --server $SQL_SERVER `
-        --resource-group $RESOURCE_GROUP `
-        --edition GeneralPurpose `
-        --compute-model Serverless `
-        --family Gen5 `
-        --capacity 1 `
-        --auto-pause-delay 60 `
-        --min-capacity 0.5 `
-        --use-free-limit `
-        --free-limit-exhaustion-behavior AutoPause `
+        --name "AllowAzureServices" `
+        --start-ip-address 0.0.0.0 `
+        --end-ip-address 0.0.0.0 `
         --output none 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "Database $SQL_DB_NAME created (Free tier, serverless, 60-min auto-pause)" "Green"
+        Write-Status "Firewall rule: Azure services allowed" "Green"
     } else {
-        Write-Status "Failed to create database (free tier may already be used on this subscription)" "Red"
-        Write-Status "Retrying with Basic tier (£3.22/mo)..." "Yellow"
+        Write-Status "Failed to create Azure services firewall rule" "Red"
+    }
+
+    if ($devIp) {
+        az sql server firewall-rule create `
+            --server $SQL_SERVER `
+            --resource-group $RESOURCE_GROUP `
+            --name "AllowDeveloperIP" `
+            --start-ip-address $devIp `
+            --end-ip-address $devIp `
+            --output none 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "Firewall rule: Developer IP $devIp allowed" "Green"
+        } else {
+            Write-Status "Failed to create developer IP firewall rule" "Red"
+        }
+    }
+
+    # Database (free tier)
+    $dbCheck = az sql db show --name $SQL_DB_NAME --server $SQL_SERVER --resource-group $RESOURCE_GROUP --output json 2>$null
+    if ($dbCheck) {
+        Write-Status "Database $SQL_DB_NAME already exists" "Yellow"
+    } else {
         az sql db create `
             --name $SQL_DB_NAME `
             --server $SQL_SERVER `
             --resource-group $RESOURCE_GROUP `
-            --edition Basic `
+            --edition GeneralPurpose `
+            --compute-model Serverless `
+            --family Gen5 `
+            --capacity 1 `
+            --auto-pause-delay 60 `
+            --min-capacity 0.5 `
+            --use-free-limit `
+            --free-limit-exhaustion-behavior AutoPause `
             --output none 2>$null
         if ($LASTEXITCODE -eq 0) {
-            Write-Status "Database $SQL_DB_NAME created (Basic tier fallback)" "Green"
+            Write-Status "Database $SQL_DB_NAME created (Free tier, serverless, 60-min auto-pause)" "Green"
         } else {
-            Write-Status "Failed to create database" "Red"
+            Write-Status "Free tier unavailable — trying Basic tier..." "Yellow"
+            $dbError = az sql db create `
+                --name $SQL_DB_NAME `
+                --server $SQL_SERVER `
+                --resource-group $RESOURCE_GROUP `
+                --edition Basic `
+                --output none 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Status "Database $SQL_DB_NAME created (Basic tier fallback)" "Green"
+            } else {
+                $errText = ($dbError | Out-String).Trim()
+                Write-Status "Failed to create database" "Red"
+                if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
+            }
         }
     }
+} else {
+    Write-Status "Skipping firewall rules and database — SQL Server not available" "Yellow"
 }
 
 $SQL_FQDN = "${SQL_SERVER}.database.windows.net"
@@ -340,7 +406,20 @@ if ($searchCheck) {
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$SEARCH_SERVICE created (Free SKU)" "Green"
     } else {
-        Write-Status "Failed to create search service (free tier limit: 1 per subscription)" "Red"
+        Write-Status "Free tier unavailable (limit: 1 per subscription) — trying Basic SKU..." "Yellow"
+        $searchError = az search service create `
+            --name $SEARCH_SERVICE `
+            --resource-group $RESOURCE_GROUP `
+            --location $LOCATION `
+            --sku basic `
+            --output none 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "$SEARCH_SERVICE created (Basic SKU)" "Green"
+        } else {
+            $errText = ($searchError | Out-String).Trim()
+            Write-Status "Failed to create search service" "Red"
+            if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
+        }
     }
 }
 
@@ -424,20 +503,37 @@ $llmCheck = az cognitiveservices account deployment show `
 if ($llmCheck) {
     Write-Status "$LLM_DEPLOYMENT deployment already exists" "Yellow"
 } else {
-    az cognitiveservices account deployment create `
+    $llmError = az cognitiveservices account deployment create `
         --name $OPENAI_ACCOUNT `
         --resource-group $RESOURCE_GROUP `
         --deployment-name $LLM_DEPLOYMENT `
         --model-name $LLM_DEPLOYMENT `
-        --model-version "2024-08-06" `
+        --model-version "2024-11-20" `
         --model-format OpenAI `
         --sku-name GlobalStandard `
         --sku-capacity 30 `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$LLM_DEPLOYMENT deployed (GlobalStandard, capacity 30)" "Green"
     } else {
-        Write-Status "Failed to deploy $LLM_DEPLOYMENT" "Red"
+        Write-Status "GlobalStandard SKU unavailable — trying Standard..." "Yellow"
+        $llmError = az cognitiveservices account deployment create `
+            --name $OPENAI_ACCOUNT `
+            --resource-group $RESOURCE_GROUP `
+            --deployment-name $LLM_DEPLOYMENT `
+            --model-name $LLM_DEPLOYMENT `
+            --model-version "2024-11-20" `
+            --model-format OpenAI `
+            --sku-name Standard `
+            --sku-capacity 30 `
+            --output none 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "$LLM_DEPLOYMENT deployed (Standard, capacity 30)" "Green"
+        } else {
+            $errText = ($llmError | Out-String).Trim()
+            Write-Status "Failed to deploy $LLM_DEPLOYMENT" "Red"
+            if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
+        }
     }
 }
 
@@ -451,17 +547,32 @@ $planCheck = az appservice plan show --name $APP_PLAN --resource-group $RESOURCE
 if ($planCheck) {
     Write-Status "$APP_PLAN already exists" "Yellow"
 } else {
-    az appservice plan create `
+    # Try F1 (free) first, then B1 as fallback
+    $planError = az appservice plan create `
         --name $APP_PLAN `
         --resource-group $RESOURCE_GROUP `
-        --location $LOCATION `
+        --location $COMPUTE_LOCATION `
         --sku F1 `
         --is-linux `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "$APP_PLAN created (F1 Free Linux)" "Green"
+        Write-Status "$APP_PLAN created (F1 Free Linux in $COMPUTE_LOCATION)" "Green"
     } else {
-        Write-Status "Failed to create app service plan" "Red"
+        Write-Status "F1 unavailable — trying B1..." "Yellow"
+        $planError = az appservice plan create `
+            --name $APP_PLAN `
+            --resource-group $RESOURCE_GROUP `
+            --location $COMPUTE_LOCATION `
+            --sku B1 `
+            --is-linux `
+            --output none 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "$APP_PLAN created (B1 Linux in $COMPUTE_LOCATION)" "Green"
+        } else {
+            $errText = ($planError | Out-String).Trim()
+            Write-Status "Failed to create app service plan" "Red"
+            if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
+        }
     }
 }
 
@@ -475,16 +586,18 @@ $chatCheck = az webapp show --name $CHAT_APP --resource-group $RESOURCE_GROUP --
 if ($chatCheck) {
     Write-Status "$CHAT_APP already exists" "Yellow"
 } else {
-    az webapp create `
+    $appError = az webapp create `
         --name $CHAT_APP `
         --resource-group $RESOURCE_GROUP `
         --plan $APP_PLAN `
         --runtime "PYTHON:3.11" `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "$CHAT_APP created (Python 3.11 on F1)" "Green"
+        Write-Status "$CHAT_APP created (Python 3.11)" "Green"
     } else {
+        $errText = ($appError | Out-String).Trim()
         Write-Status "Failed to create chat web app" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
     }
 }
 
@@ -500,16 +613,18 @@ $uiCheck = az webapp show --name $UI_APP --resource-group $RESOURCE_GROUP --outp
 if ($uiCheck) {
     Write-Status "$UI_APP already exists" "Yellow"
 } else {
-    az webapp create `
+    $appError = az webapp create `
         --name $UI_APP `
         --resource-group $RESOURCE_GROUP `
         --plan $APP_PLAN `
         --runtime "NODE:20-lts" `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "$UI_APP created (Node 20 on F1)" "Green"
+        Write-Status "$UI_APP created (Node 20)" "Green"
     } else {
+        $errText = ($appError | Out-String).Trim()
         Write-Status "Failed to create UI web app" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
     }
 }
 
@@ -525,20 +640,22 @@ $utilsCheck = az functionapp show --name $UTILS_FUNC --resource-group $RESOURCE_
 if ($utilsCheck) {
     Write-Status "$UTILS_FUNC already exists" "Yellow"
 } else {
-    az functionapp create `
+    $funcError = az functionapp create `
         --name $UTILS_FUNC `
         --resource-group $RESOURCE_GROUP `
         --storage-account $STORAGE_ACCOUNT `
-        --consumption-plan-location $LOCATION `
+        --consumption-plan-location $FUNC_LOCATION `
         --runtime python `
         --runtime-version 3.11 `
         --functions-version 4 `
         --os-type Linux `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "$UTILS_FUNC created (Consumption plan)" "Green"
+        Write-Status "$UTILS_FUNC created (Consumption plan in $COMPUTE_LOCATION)" "Green"
     } else {
+        $errText = ($funcError | Out-String).Trim()
         Write-Status "Failed to create utils function app" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
     }
 }
 
@@ -554,20 +671,22 @@ $ingestCheck = az functionapp show --name $INGEST_FUNC --resource-group $RESOURC
 if ($ingestCheck) {
     Write-Status "$INGEST_FUNC already exists" "Yellow"
 } else {
-    az functionapp create `
+    $funcError = az functionapp create `
         --name $INGEST_FUNC `
         --resource-group $RESOURCE_GROUP `
         --storage-account $STORAGE_ACCOUNT `
-        --consumption-plan-location $LOCATION `
+        --consumption-plan-location $FUNC_LOCATION `
         --runtime python `
         --runtime-version 3.11 `
         --functions-version 4 `
         --os-type Linux `
-        --output none 2>$null
+        --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Write-Status "$INGEST_FUNC created (Consumption plan)" "Green"
+        Write-Status "$INGEST_FUNC created (Consumption plan in $COMPUTE_LOCATION)" "Green"
     } else {
+        $errText = ($funcError | Out-String).Trim()
         Write-Status "Failed to create ingestion function app" "Red"
+        if ($errText) { Write-Host "    $errText" -ForegroundColor DarkRed }
     }
 }
 
@@ -579,103 +698,18 @@ $INGEST_URL = "https://${INGEST_FUNC}.azurewebsites.net/api"
 
 Write-Section "Configuring App Settings"
 
-# ── Chat Web App ──────────────────────────────────────────────────────────────
-Write-Status "Setting Chat Web App configuration..." "Cyan"
-az webapp config appsettings set `
-    --name $CHAT_APP `
-    --resource-group $RESOURCE_GROUP `
-    --settings `
-        DATABASE_URL="$DATABASE_URL" `
-        AZURE_OPENAI_ENDPOINT="$OPENAI_ENDPOINT" `
-        AZURE_OPENAI_API_KEY="$OPENAI_KEY" `
-        AZURE_OPENAI_API_VERSION="$OPENAI_API_VER" `
-        DEFAULT_LLM_DEPLOYMENT="$LLM_DEPLOYMENT" `
-        EMBEDDING_DEPLOYMENT="$EMBED_DEPLOYMENT" `
-        EMBEDDING_DIMENSIONS="$EMBED_DIMS" `
-        AZURE_SEARCH_ENDPOINT="$SEARCH_ENDPOINT" `
-        AZURE_SEARCH_ADMIN_KEY="$SEARCH_ADMIN_KEY" `
-        AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN_STR" `
-        DEFAULT_BLOB_CONTAINER="$BLOB_CONTAINER" `
-        AZURE_TABLE_NAME="$TABLE_NAME" `
-        DEFAULT_TOP_K="$TOP_K" `
-        JWT_SECRET="$JWT_SECRET" `
-        ALLOWED_ORIGINS="$UI_URL" `
-        SCM_DO_BUILD_DURING_DEPLOYMENT="true" `
-    --output none 2>$null
+# Delegate to bash script — PowerShell mangles special chars (&, =, ;) in az CLI args
+Write-Status "Configuring all app settings via bash..." "Cyan"
+$configScript = Join-Path $PSScriptRoot "configure-settings.sh"
+bash $configScript 2>$null
 if ($LASTEXITCODE -eq 0) {
-    Write-Status "Chat Web App: 16 settings configured" "Green"
+    Write-Status "All app settings configured" "Green"
 } else {
-    Write-Status "Failed to configure Chat Web App settings" "Red"
+    Write-Status "Some settings may have failed — check Azure Portal" "Yellow"
 }
 
-# Set startup command
-az webapp config set `
-    --name $CHAT_APP `
-    --resource-group $RESOURCE_GROUP `
-    --startup-file "startup.sh" `
-    --output none 2>$null
-
-# ── UI Web App ────────────────────────────────────────────────────────────────
-Write-Status "Setting UI Web App configuration..." "Cyan"
-az webapp config appsettings set `
-    --name $UI_APP `
-    --resource-group $RESOURCE_GROUP `
-    --settings `
-        VITE_CHAT_API_URL="$CHAT_URL" `
-        VITE_UTILS_API_URL="$UTILS_URL" `
-        VITE_INGESTION_API_URL="$INGEST_URL" `
-        VITE_MSAL_CLIENT_ID="<SET_AFTER_AD_APP_REGISTRATION>" `
-        VITE_MSAL_TENANT_ID="<SET_AFTER_AD_APP_REGISTRATION>" `
-        VITE_MSAL_REDIRECT_URI="$UI_URL" `
-    --output none 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Status "UI Web App: 6 settings configured" "Green"
-} else {
-    Write-Status "Failed to configure UI Web App settings" "Red"
-}
-
-# ── Utils Function App ────────────────────────────────────────────────────────
-Write-Status "Setting Utils Function App configuration..." "Cyan"
-az functionapp config appsettings set `
-    --name $UTILS_FUNC `
-    --resource-group $RESOURCE_GROUP `
-    --settings `
-        DATABASE_URL="$DATABASE_URL" `
-        AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN_STR" `
-        AZURE_TABLE_NAME="$TABLE_NAME" `
-        DEFAULT_BLOB_CONTAINER="$BLOB_CONTAINER" `
-        JWT_SECRET="$JWT_SECRET" `
-        AZURE_SEARCH_ENDPOINT="$SEARCH_ENDPOINT" `
-        AZURE_SEARCH_ADMIN_KEY="$SEARCH_ADMIN_KEY" `
-    --output none 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Status "Utils Function App: 7 settings configured" "Green"
-} else {
-    Write-Status "Failed to configure Utils Function App settings" "Red"
-}
-
-# ── Ingestion Function App ────────────────────────────────────────────────────
-Write-Status "Setting Ingestion Function App configuration..." "Cyan"
-az functionapp config appsettings set `
-    --name $INGEST_FUNC `
-    --resource-group $RESOURCE_GROUP `
-    --settings `
-        DATABASE_URL="$DATABASE_URL" `
-        AZURE_OPENAI_ENDPOINT="$OPENAI_ENDPOINT" `
-        AZURE_OPENAI_API_KEY="$OPENAI_KEY" `
-        AZURE_OPENAI_API_VERSION="$OPENAI_API_VER" `
-        EMBEDDING_DEPLOYMENT="$EMBED_DEPLOYMENT" `
-        EMBEDDING_DIMENSIONS="$EMBED_DIMS" `
-        AZURE_SEARCH_ENDPOINT="$SEARCH_ENDPOINT" `
-        AZURE_SEARCH_ADMIN_KEY="$SEARCH_ADMIN_KEY" `
-        AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN_STR" `
-        DEFAULT_BLOB_CONTAINER="$BLOB_CONTAINER" `
-    --output none 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Status "Ingestion Function App: 10 settings configured" "Green"
-} else {
-    Write-Status "Failed to configure Ingestion Function App settings" "Red"
-}
+# Set startup command for chat app
+az webapp config set --name $CHAT_APP --resource-group $RESOURCE_GROUP --startup-file "startup.sh" --output none 2>$null
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  GENERATE .env FILE                                                         ║
@@ -716,9 +750,9 @@ AZURE_TABLE_NAME=$TABLE_NAME
 # ── Authentication ────────────────────────────────────────────────────────────
 JWT_SECRET=$JWT_SECRET
 MAGIC_LINK_BASE_URL=$UI_URL/auth/verify
-MSAL_CLIENT_ID=<SET_AFTER_AD_APP_REGISTRATION>
-MSAL_TENANT_ID=<SET_AFTER_AD_APP_REGISTRATION>
-ALLOWED_AD_GROUPS=
+MSAL_CLIENT_ID=SET_AFTER_AD_APP_REGISTRATION
+MSAL_TENANT_ID=SET_AFTER_AD_APP_REGISTRATION
+ALLOWED_AD_GROUPS=[]
 
 # ── Search Defaults ───────────────────────────────────────────────────────────
 DEFAULT_TOP_K=$TOP_K
@@ -736,8 +770,8 @@ $uiEnvContent = @"
 # UI environment — Auto-generated by provision-azure.ps1
 VITE_CHAT_API_URL=http://localhost:8000
 VITE_UTILS_API_URL=http://localhost:7071/api
-VITE_MSAL_CLIENT_ID=<SET_AFTER_AD_APP_REGISTRATION>
-VITE_MSAL_TENANT_ID=<SET_AFTER_AD_APP_REGISTRATION>
+VITE_MSAL_CLIENT_ID=SET_AFTER_AD_APP_REGISTRATION
+VITE_MSAL_TENANT_ID=SET_AFTER_AD_APP_REGISTRATION
 VITE_MSAL_REDIRECT_URI=http://localhost:5173
 "@
 
@@ -754,40 +788,27 @@ Write-Host "║                  Provisioning Complete                      ║"
 Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
-$summary = @"
-
-  RESOURCE SUMMARY
-  ════════════════════════════════════════════════════════════════
-
-  Resource Group       $RESOURCE_GROUP
-  Location             $LOCATION
-
-  ┌──────────────────────────────────────────────────────────────┐
-  │ Resource             │ Name / URL                │ Cost/mo   │
-  ├──────────────────────┼───────────────────────────┼───────────┤
-  │ Storage Account      │ $STORAGE_ACCOUNT          │ ~$0.01    │
-  │ SQL Server           │ $SQL_FQDN                 │ Free*     │
-  │ SQL Database         │ $SQL_DB_NAME              │ Free*     │
-  │ AI Search            │ $SEARCH_ENDPOINT          │ Free      │
-  │ Azure OpenAI         │ $OPENAI_ENDPOINT          │ Pay/use   │
-  │   └─ Embedding       │ $EMBED_DEPLOYMENT         │ ~$0.10/1M │
-  │   └─ Chat LLM        │ $LLM_DEPLOYMENT           │ ~$2.50/1M │
-  │ App Service Plan     │ $APP_PLAN (F1)            │ Free      │
-  │ Chat Web App         │ $CHAT_URL                 │ Free      │
-  │ UI Web App           │ $UI_URL                   │ Free      │
-  │ Utils Function App   │ $UTILS_URL                │ Free**    │
-  │ Ingestion Func App   │ $INGEST_URL               │ Free**    │
-  └──────────────────────┴───────────────────────────┴───────────┘
-
-  * SQL Free tier: 100K vCore-seconds/mo, 32GB storage, auto-pause after 60min
-  ** Consumption plan: 1M executions + 400K GB-s free per month
-
-  Estimated monthly cost (idle):  ~$0.01  (storage only)
-  Estimated monthly cost (light): ~$1-5   (OpenAI usage dependent)
-
-"@
-
-Write-Host $summary
+Write-Host ""
+Write-Host "  RESOURCE SUMMARY" -ForegroundColor White
+Write-Host "  ================================================================" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Resource Group       : $RESOURCE_GROUP"
+Write-Host "  Location             : $LOCATION"
+Write-Host ""
+Write-Host "  Storage Account      : $STORAGE_ACCOUNT"
+Write-Host "  SQL Server           : $SQL_FQDN"
+Write-Host "  SQL Database         : $SQL_DB_NAME"
+Write-Host "  AI Search            : $SEARCH_ENDPOINT"
+Write-Host "  Azure OpenAI         : $OPENAI_ENDPOINT"
+Write-Host "    Embedding model    : $EMBED_DEPLOYMENT"
+Write-Host "    Chat LLM           : $LLM_DEPLOYMENT"
+Write-Host "  App Service Plan     : $APP_PLAN"
+Write-Host "  Chat Web App         : $CHAT_URL"
+Write-Host "  UI Web App           : $UI_URL"
+Write-Host "  Utils Function App   : $UTILS_URL"
+Write-Host "  Ingestion Func App   : $INGEST_URL"
+Write-Host ""
+Write-Host "  Estimated cost: ~`$0 idle, ~`$1-5/mo light use (OpenAI pay-per-token)" -ForegroundColor Gray
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  NEXT STEPS                                                                 ║
