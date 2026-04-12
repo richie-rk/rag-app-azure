@@ -41,49 +41,37 @@ The UI is built with React 18 and Fluent UI 9, following the Microsoft Teams des
 
 Centered authentication card with Microsoft Entra ID SSO and magic link email sign-in for guest access.
 
-| Light | Dark |
-|-------|------|
-| ![Login Light](docs/images/ui-login-light.png) | ![Login Dark](docs/images/ui-login-dark.png) |
+![Login](docs/images/ui-login-dark.png)
 
 ### Chat
 
 Three-column layout with session history, message area with streaming responses and follow-up suggestions, and a toggleable citation panel showing source documents.
 
-| Light | Dark |
-|-------|------|
-| ![Chat Light](docs/images/ui-chat-light.png) | ![Chat Dark](docs/images/ui-chat-dark.png) |
+![Chat](docs/images/ui-chat-dark.png)
 
 ### Projects
 
 Card grid displaying all projects with chunking strategy, LLM deployment, and default badges. Includes empty state for new deployments.
 
-| Light | Dark |
-|-------|------|
-| ![Projects Light](docs/images/ui-projects-light.png) | ![Projects Dark](docs/images/ui-projects-dark.png) |
+![Projects](docs/images/ui-projects-dark.png)
 
 ### Create / Edit Project
 
 Form for configuring project name, department, system prompt, chunking strategy, and LLM deployment.
 
-| Light | Dark |
-|-------|------|
-| ![Create Project Light](docs/images/ui-create-project-light.png) | ![Create Project Dark](docs/images/ui-create-project-dark.png) |
+![Create Project](docs/images/ui-create-project-dark.png)
 
 ### Data Loader
 
 Drag-and-drop file upload zone with project selector and ingestion status table showing per-file processing state.
 
-| Light | Dark |
-|-------|------|
-| ![Data Loader Light](docs/images/ui-dataloader-light.png) | ![Data Loader Dark](docs/images/ui-dataloader-dark.png) |
+![Data Loader](docs/images/ui-dataloader-dark.png)
 
 ### Settings
 
 Stacked configuration cards for profile, appearance (theme toggle), default chat parameters (temperature, top-K), and application info.
 
-| Light | Dark |
-|-------|------|
-| ![Settings Light](docs/images/ui-settings-light.png) | ![Settings Dark](docs/images/ui-settings-dark.png) |
+![Settings](docs/images/ui-settings-dark.png)
 
 ## Architecture
 
