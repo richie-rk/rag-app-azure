@@ -1,7 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import {
   makeStyles,
-  tokens,
   Text,
   Button,
   Card,
@@ -36,7 +35,7 @@ const useStyles = makeStyles({
 export function ProjectsPage() {
   const styles = useStyles();
   const navigate = useNavigate();
-  const { projects, loading } = useProjects();
+  const { projects, loading: _loading } = useProjects();
 
   return (
     <div className={styles.root}>
