@@ -10,6 +10,8 @@ import {
   TableHeaderCell,
   TableRow,
   Spinner,
+  tokens,
+  Card,
 } from "@fluentui/react-components";
 import { FileUpload } from "../components/FileUpload";
 import { ProjectSelector } from "../components/ProjectSelector";
@@ -17,9 +19,51 @@ import { useProjects } from "../hooks/useProjects";
 import { triggerIngestion, getAuditInfo } from "../api/ingestion";
 
 const useStyles = makeStyles({
-  root: { padding: "24px", maxWidth: "960px", margin: "0 auto" },
-  section: { marginTop: "24px" },
-  toolbar: { display: "flex", gap: "12px", alignItems: "center", marginBottom: "16px" },
+  root: {
+    padding: "32px",
+    maxWidth: "1000px",
+    margin: "0 auto",
+  },
+  title: {
+    fontSize: "24px",
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground1,
+    marginBottom: "24px",
+    display: "block",
+  },
+  projectRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    marginBottom: "20px",
+  },
+  projectLabel: {
+    fontSize: "14px",
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground2,
+  },
+  section: {
+    marginTop: "32px",
+  },
+  sectionTitle: {
+    fontSize: "16px",
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground1,
+    marginBottom: "12px",
+    display: "block",
+  },
+  tableCard: {
+    marginTop: "8px",
+    overflow: "hidden",
+  },
+  statusBadge: {
+    textTransform: "capitalize" as const,
+  },
+  emptyTable: {
+    textAlign: "center",
+    padding: "32px",
+    color: tokens.colorNeutralForeground3,
+  },
 });
 
 export function DataLoaderPage() {
@@ -57,11 +101,10 @@ export function DataLoaderPage() {
 
   return (
     <div className={styles.root}>
-      <Text size={600} weight="semibold">
-        Data Loader
-      </Text>
+      <Text className={styles.title}>Data Loader</Text>
 
-      <div className={styles.toolbar}>
+      <div className={styles.projectRow}>
+        <Text className={styles.projectLabel}>Project</Text>
         <ProjectSelector
           projects={projects}
           selected={selectedProject}
@@ -72,44 +115,57 @@ export function DataLoaderPage() {
       <FileUpload onUpload={handleUpload} />
 
       <div className={styles.section}>
-        <Text size={500} weight="semibold">
-          Ingestion Status
-        </Text>
+        <Text className={styles.sectionTitle}>Ingestion Status</Text>
+
         {loading ? (
-          <Spinner size="small" style={{ marginTop: 16 }} />
+          <Spinner size="small" style={{ padding: 24 }} />
         ) : (
-          <Table style={{ marginTop: 8 }}>
-            <TableHeader>
-              <TableRow>
-                <TableHeaderCell>File</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-                <TableHeaderCell>Chunks</TableHeaderCell>
-                <TableHeaderCell>Date</TableHeaderCell>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {audit.map((row, i) => (
-                <TableRow key={i}>
-                  <TableCell>{row.source_file}</TableCell>
-                  <TableCell>
-                    <Badge
-                      color={
-                        row.status === "completed"
-                          ? "success"
-                          : row.status === "failed"
-                            ? "danger"
-                            : "warning"
-                      }
-                    >
-                      {row.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>{row.chunk_count}</TableCell>
-                  <TableCell>{row.created_at}</TableCell>
+          <Card className={styles.tableCard}>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHeaderCell>File</TableHeaderCell>
+                  <TableHeaderCell>Status</TableHeaderCell>
+                  <TableHeaderCell>Chunks</TableHeaderCell>
+                  <TableHeaderCell>Date</TableHeaderCell>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {audit.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={4}>
+                      <div className={styles.emptyTable}>
+                        No ingestion records yet.
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  audit.map((row, i) => (
+                    <TableRow key={i}>
+                      <TableCell>{row.source_file}</TableCell>
+                      <TableCell>
+                        <Badge
+                          className={styles.statusBadge}
+                          color={
+                            row.status === "completed"
+                              ? "success"
+                              : row.status === "failed"
+                                ? "danger"
+                                : "warning"
+                          }
+                          size="small"
+                        >
+                          {row.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{row.chunk_count}</TableCell>
+                      <TableCell>{row.created_at}</TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </Card>
         )}
       </div>
     </div>

@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { makeStyles, Text, Button, tokens } from "@fluentui/react-components";
+import {
+  makeStyles,
+  Text,
+  Button,
+  tokens,
+  Spinner,
+  MessageBar,
+  MessageBarBody,
+} from "@fluentui/react-components";
 import { v4 as uuidv4 } from "uuid";
 import { ChatMessage } from "../components/ChatMessage";
 import { ChatInput } from "../components/ChatInput";
@@ -24,31 +32,67 @@ const useStyles = makeStyles({
     flex: 1,
     display: "flex",
     flexDirection: "column",
+    minWidth: 0,
   },
   toolbar: {
-    padding: "8px 16px",
+    padding: "10px 16px",
     display: "flex",
     alignItems: "center",
     gap: "12px",
-    borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground1,
+    height: "52px",
+    boxSizing: "border-box",
+    flexShrink: 0,
+  },
+  toolbarSpacer: {
+    flex: 1,
+  },
+  sourcesBtn: {
+    fontSize: "13px",
   },
   messages: {
     flex: 1,
     overflowY: "auto",
-    padding: "16px",
+    padding: "16px 24px",
   },
   followup: {
-    padding: "8px 16px",
+    padding: "8px 24px 4px",
     display: "flex",
     gap: "8px",
     flexWrap: "wrap",
+    flexShrink: 0,
+  },
+  followupPill: {
+    borderRadius: "16px",
+    fontSize: "13px",
   },
   empty: {
     flex: 1,
     display: "flex",
+    flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
+    gap: "8px",
     color: tokens.colorNeutralForeground3,
+  },
+  emptyIcon: {
+    fontSize: "48px",
+    color: tokens.colorNeutralForeground4,
+    marginBottom: "8px",
+  },
+  feedbackRow: {
+    paddingLeft: "44px",
+    paddingBottom: "4px",
+  },
+  thinkingRow: {
+    padding: "12px 24px",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+  },
+  errorRow: {
+    padding: "4px 24px",
   },
 });
 
@@ -64,6 +108,8 @@ export function ChatPage() {
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState(sessionId || "");
   const [showCitations, setShowCitations] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load session history when sessionId changes
   useEffect(() => {
@@ -79,6 +125,11 @@ export function ChatPage() {
       });
     }
   }, [sessionId, loadSessionHistory]);
+
+  // Auto-scroll to bottom when messages change or streaming updates
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, streamingContent]);
 
   const handleSend = useCallback(
     async (text: string) => {
@@ -108,30 +159,35 @@ export function ChatPage() {
       history.push({ user: text });
 
       // Stream response
-      const response = await sendMessage({
-        history,
-        search_index: selectedProject.index_name,
-        username: user.mail,
-        overrides: { suggest_followup_questions: true },
-      });
-
-      if (response) {
-        setMessages((prev) => [...prev, response]);
-
-        // Save to session history
-        const ts = new Date().toISOString();
-        saveSession({
-          session_id: sid,
-          timestamp: ts,
-          session_name: messages.length === 0 ? text.substring(0, 100) : "",
+      setChatError(null);
+      try {
+        const response = await sendMessage({
+          history,
+          search_index: selectedProject.index_name,
           username: user.mail,
-          user_query: text,
-          bot_response: response.content,
-          scope: selectedProject.name,
-          app: "rag-app-azure",
+          overrides: { suggest_followup_questions: true },
         });
 
-        refreshSessions();
+        if (response) {
+          setMessages((prev) => [...prev, response]);
+
+          // Save to session history
+          const ts = new Date().toISOString();
+          saveSession({
+            session_id: sid,
+            timestamp: ts,
+            session_name: messages.length === 0 ? text.substring(0, 100) : "",
+            username: user.mail,
+            user_query: text,
+            bot_response: response.content,
+            scope: selectedProject.name,
+            app: "rag-app-azure",
+          });
+
+          refreshSessions();
+        }
+      } catch (err) {
+        setChatError(err instanceof Error ? err.message : "Failed to get a response. Please try again.");
       }
     },
     [selectedProject, user, messages, currentSessionId, sendMessage, refreshSessions],
@@ -162,18 +218,27 @@ export function ChatPage() {
             selected={selectedProject}
             onSelect={setSelectedProject}
           />
+          <div className={styles.toolbarSpacer} />
           <Button
-            appearance="subtle"
+            appearance={showCitations ? "subtle" : "outline"}
             onClick={() => setShowCitations(!showCitations)}
             size="small"
+            className={styles.sourcesBtn}
           >
-            {showCitations ? "Hide Sources" : "Show Sources"}
+            {showCitations ? "Hide Sources" : "Sources"}
           </Button>
         </div>
 
         {messages.length === 0 && !isStreaming ? (
           <div className={styles.empty}>
-            <Text size={500}>Ask a question to get started</Text>
+            <Text size={500} weight="semibold" style={{ color: tokens.colorNeutralForeground3 }}>
+              Ask a question to get started
+            </Text>
+            <Text size={300} style={{ color: tokens.colorNeutralForeground4 }}>
+              {selectedProject
+                ? `Querying ${selectedProject.display_name}`
+                : "Select a project first"}
+            </Text>
           </div>
         ) : (
           <div className={styles.messages}>
@@ -181,7 +246,7 @@ export function ChatPage() {
               <div key={i}>
                 <ChatMessage message={msg} />
                 {msg.role === "assistant" && (
-                  <div style={{ paddingLeft: 44 }}>
+                  <div className={styles.feedbackRow}>
                     <FeedbackButton
                       sessionId={currentSessionId}
                       timestamp={msg.timestamp}
@@ -199,6 +264,22 @@ export function ChatPage() {
                 }}
               />
             )}
+            {isStreaming && !streamingContent && (
+              <div className={styles.thinkingRow}>
+                <Spinner size="tiny" />
+                <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+                  Thinking...
+                </Text>
+              </div>
+            )}
+            {chatError && (
+              <div className={styles.errorRow}>
+                <MessageBar intent="error">
+                  <MessageBarBody>{chatError}</MessageBarBody>
+                </MessageBar>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
           </div>
         )}
 
@@ -209,6 +290,8 @@ export function ChatPage() {
                 key={i}
                 appearance="outline"
                 size="small"
+                className={styles.followupPill}
+                shape="circular"
                 onClick={() => handleSend(q)}
               >
                 {q}

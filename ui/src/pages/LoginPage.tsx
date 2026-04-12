@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   makeStyles,
@@ -6,12 +6,14 @@ import {
   Text,
   Button,
   Input,
-  Card,
-  CardHeader,
   Field,
   Divider,
   Spinner,
 } from "@fluentui/react-components";
+import {
+  DocumentSearchRegular,
+  ShieldKeyholeRegular,
+} from "@fluentui/react-icons";
 import { useAuth } from "../hooks/useAuth";
 import { apiClient } from "../api/client";
 
@@ -20,12 +22,89 @@ const useStyles = makeStyles({
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    height: "100vh",
+    minHeight: "100vh",
     backgroundColor: tokens.colorNeutralBackground2,
   },
-  card: { width: "400px", padding: "24px" },
-  form: { display: "flex", flexDirection: "column", gap: "16px", marginTop: "16px" },
-  divider: { margin: "16px 0" },
+  card: {
+    width: "420px",
+    padding: "40px",
+    backgroundColor: tokens.colorNeutralBackground1,
+    borderRadius: "12px",
+    boxShadow: tokens.shadow16,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+  },
+  iconContainer: {
+    width: "64px",
+    height: "64px",
+    borderRadius: "16px",
+    backgroundColor: tokens.colorBrandBackground2,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: "20px",
+  },
+  icon: {
+    fontSize: "32px",
+    color: tokens.colorBrandForeground1,
+  },
+  title: {
+    fontSize: "24px",
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground1,
+    marginBottom: "4px",
+  },
+  subtitle: {
+    fontSize: "14px",
+    color: tokens.colorNeutralForeground3,
+    marginBottom: "28px",
+  },
+  msButton: {
+    width: "100%",
+    height: "44px",
+    fontSize: "15px",
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  divider: {
+    width: "100%",
+    margin: "24px 0",
+  },
+  emailSection: {
+    width: "100%",
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+  },
+  emailLabel: {
+    fontSize: "14px",
+    color: tokens.colorNeutralForeground2,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  sendButton: {
+    width: "100%",
+    height: "38px",
+  },
+  footer: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginTop: "28px",
+    color: tokens.colorNeutralForeground4,
+    fontSize: "12px",
+  },
+  footerIcon: {
+    fontSize: "14px",
+  },
+  sentMessage: {
+    width: "100%",
+    textAlign: "center",
+    padding: "16px",
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: "8px",
+    color: tokens.colorNeutralForeground2,
+    fontSize: "14px",
+  },
 });
 
 export function LoginPage() {
@@ -39,22 +118,24 @@ export function LoginPage() {
 
   // Handle magic link verification
   const token = searchParams.get("token");
-  if (token && !verifying) {
-    setVerifying(true);
-    apiClient(`/auth/verify?token=${token}`)
-      .then((result) => {
-        if (result.token) {
-          localStorage.setItem("rag_auth_token", result.token);
-          navigate("/chat");
-        }
-      })
-      .catch(() => setVerifying(false));
-  }
+  useEffect(() => {
+    if (token && !verifying) {
+      setVerifying(true);
+      apiClient(`/auth/verify?token=${token}`)
+        .then((result) => {
+          if (result.token) {
+            localStorage.setItem("rag_auth_token", result.token);
+            navigate("/chat");
+          }
+        })
+        .catch(() => setVerifying(false));
+    }
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (verifying) {
     return (
       <div className={styles.root}>
-        <Spinner label="Verifying your link..." />
+        <Spinner label="Verifying your link..." size="large" />
       </div>
     );
   }
@@ -70,47 +151,68 @@ export function LoginPage() {
 
   return (
     <div className={styles.root}>
-      <Card className={styles.card}>
-        <CardHeader
-          header={
-            <Text size={600} weight="semibold">
-              RAG App Azure
-            </Text>
+      <div className={styles.card}>
+        <div className={styles.iconContainer}>
+          <DocumentSearchRegular className={styles.icon} />
+        </div>
+        <Text className={styles.title}>rag-app-azure</Text>
+        <Text className={styles.subtitle}>Enterprise RAG Platform</Text>
+
+        <Button
+          appearance="primary"
+          className={styles.msButton}
+          onClick={login}
+          size="large"
+          icon={
+            <svg width="20" height="20" viewBox="0 0 21 21" fill="none">
+              <rect x="1" y="1" width="9" height="9" fill="#F25022" />
+              <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+              <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
+              <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+            </svg>
           }
-        />
+        >
+          Sign in with Microsoft
+        </Button>
 
-        <div className={styles.form}>
-          <Button appearance="primary" onClick={login} size="large">
-            Sign in with Microsoft
-          </Button>
+        <Divider className={styles.divider}>or</Divider>
 
-          <Divider className={styles.divider}>or</Divider>
-
+        <div className={styles.emailSection}>
           {sent ? (
-            <Text align="center">
+            <div className={styles.sentMessage}>
               Check your email for a sign-in link.
-            </Text>
+            </div>
           ) : (
             <>
-              <Field label="Guest access via email">
+              <Text className={styles.emailLabel}>Sign in with email</Text>
+              <Field>
                 <Input
                   type="email"
                   value={email}
                   onChange={(_, d) => setEmail(d.value)}
                   placeholder="your@email.com"
+                  size="large"
                 />
               </Field>
               <Button
                 appearance="secondary"
+                className={styles.sendButton}
                 onClick={handleMagicLink}
                 disabled={!email}
               >
-                Send Magic Link
+                Send sign-in link
               </Button>
             </>
           )}
         </div>
-      </Card>
+
+        <div className={styles.footer}>
+          <ShieldKeyholeRegular className={styles.footerIcon} />
+          <Text size={100} style={{ color: tokens.colorNeutralForeground4 }}>
+            Secured by Microsoft Entra ID
+          </Text>
+        </div>
+      </div>
     </div>
   );
 }
