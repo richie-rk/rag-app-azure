@@ -1,20 +1,22 @@
-import { makeStyles, tokens, Text } from "@fluentui/react-components";
+import { makeStyles, tokens, Text, mergeClasses } from "@fluentui/react-components";
 import { PersonRegular, BotRegular } from "@fluentui/react-icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
 import type { ChatMessage as ChatMessageType } from "../api/types";
 
 const useStyles = makeStyles({
-  container: {
+  row: {
     display: "flex",
     gap: "12px",
-    padding: "16px",
+    padding: "12px 0",
     maxWidth: "800px",
   },
-  userMessage: {
+  rowUser: {
     flexDirection: "row-reverse",
+    marginLeft: "auto",
   },
-  icon: {
+  avatar: {
     width: "32px",
     height: "32px",
     borderRadius: "50%",
@@ -22,43 +24,83 @@ const useStyles = makeStyles({
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
+    fontSize: "16px",
   },
-  userIcon: {
+  avatarUser: {
     backgroundColor: tokens.colorBrandBackground,
     color: tokens.colorNeutralForegroundOnBrand,
   },
-  botIcon: {
+  avatarBot: {
     backgroundColor: tokens.colorNeutralBackground4,
+    color: tokens.colorNeutralForeground2,
   },
   bubble: {
     padding: "12px 16px",
-    borderRadius: "8px",
+    borderRadius: "12px",
     maxWidth: "680px",
+    lineHeight: "1.5",
+    fontSize: "14px",
     "& p": { margin: "0 0 8px 0" },
     "& p:last-child": { marginBottom: 0 },
     "& pre": {
       backgroundColor: tokens.colorNeutralBackground4,
       padding: "12px",
-      borderRadius: "4px",
+      borderRadius: "6px",
       overflowX: "auto",
+      margin: "8px 0",
     },
-    "& code": { fontSize: tokens.fontSizeBase200 },
+    "& code": {
+      fontSize: "13px",
+      fontFamily: "'Cascadia Code', 'Fira Code', monospace",
+    },
     "& table": {
       borderCollapse: "collapse",
       width: "100%",
+      margin: "8px 0",
     },
     "& th, & td": {
-      border: `1px solid ${tokens.colorNeutralStroke1}`,
+      border: `1px solid ${tokens.colorNeutralStroke2}`,
       padding: "6px 10px",
       textAlign: "left",
+      fontSize: "13px",
+    },
+    "& th": {
+      backgroundColor: tokens.colorNeutralBackground3,
+      fontWeight: tokens.fontWeightSemibold,
+    },
+    "& ul, & ol": {
+      paddingLeft: "20px",
+      margin: "4px 0 8px 0",
+    },
+    "& li": {
+      marginBottom: "4px",
     },
   },
-  userBubble: {
+  bubbleUser: {
     backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorNeutralForeground1,
+    borderBottomRightRadius: "4px",
   },
-  botBubble: {
+  bubbleBot: {
     backgroundColor: tokens.colorNeutralBackground1,
-    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderBottomLeftRadius: "4px",
+  },
+  citation: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
+    padding: "2px 8px",
+    borderRadius: "4px",
+    backgroundColor: tokens.colorBrandBackground2,
+    color: tokens.colorBrandForeground1,
+    fontSize: "12px",
+    fontWeight: tokens.fontWeightSemibold,
+    cursor: "pointer",
+    marginRight: "4px",
+    "&:hover": {
+      backgroundColor: tokens.colorBrandBackground2Hover,
+    },
   },
 });
 
@@ -71,19 +113,25 @@ export function ChatMessage({ message }: Props) {
   const isUser = message.role === "user";
 
   return (
-    <div className={`${styles.container} ${isUser ? styles.userMessage : ""}`}>
+    <div className={mergeClasses(styles.row, isUser && styles.rowUser)}>
       <div
-        className={`${styles.icon} ${isUser ? styles.userIcon : styles.botIcon}`}
+        className={mergeClasses(
+          styles.avatar,
+          isUser ? styles.avatarUser : styles.avatarBot,
+        )}
       >
         {isUser ? <PersonRegular /> : <BotRegular />}
       </div>
       <div
-        className={`${styles.bubble} ${isUser ? styles.userBubble : styles.botBubble}`}
+        className={mergeClasses(
+          styles.bubble,
+          isUser ? styles.bubbleUser : styles.bubbleBot,
+        )}
       >
         {isUser ? (
           <Text>{message.content}</Text>
         ) : (
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
             {message.content}
           </ReactMarkdown>
         )}

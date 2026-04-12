@@ -10,13 +10,22 @@ import { SendRegular } from "@fluentui/react-icons";
 const useStyles = makeStyles({
   container: {
     display: "flex",
+    alignItems: "flex-end",
     gap: "8px",
-    padding: "16px",
-    borderTop: `1px solid ${tokens.colorNeutralStroke1}`,
+    padding: "12px 16px",
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
     backgroundColor: tokens.colorNeutralBackground1,
   },
   input: {
     flex: 1,
+    "& textarea": {
+      maxHeight: "120px",
+    },
+  },
+  sendBtn: {
+    height: "40px",
+    minWidth: "40px",
+    borderRadius: "8px",
   },
 });
 
@@ -55,15 +64,15 @@ export function ChatInput({ onSend, disabled, placeholder }: Props) {
         placeholder={placeholder || "Ask a question..."}
         disabled={disabled}
         resize="vertical"
+        size="large"
       />
       <Button
         appearance="primary"
         icon={<SendRegular />}
+        className={styles.sendBtn}
         onClick={handleSend}
         disabled={disabled || !value.trim()}
-      >
-        Send
-      </Button>
+      />
     </div>
   );
 }

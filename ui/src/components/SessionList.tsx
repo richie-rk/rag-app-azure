@@ -4,6 +4,7 @@ import {
   Text,
   Button,
   Divider,
+  mergeClasses,
 } from "@fluentui/react-components";
 import {
   ChatRegular,
@@ -15,16 +16,24 @@ import type { Session } from "../api/types";
 const useStyles = makeStyles({
   container: {
     width: "260px",
-    borderRight: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRight: `1px solid ${tokens.colorNeutralStroke2}`,
     display: "flex",
     flexDirection: "column",
     backgroundColor: tokens.colorNeutralBackground2,
+    flexShrink: 0,
   },
   header: {
-    padding: "12px 16px",
+    padding: "14px 16px",
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    height: "52px",
+    boxSizing: "border-box",
+  },
+  headerTitle: {
+    fontSize: "14px",
+    fontWeight: tokens.fontWeightSemibold,
+    color: tokens.colorNeutralForeground1,
   },
   list: {
     flex: 1,
@@ -38,18 +47,40 @@ const useStyles = makeStyles({
     padding: "8px 12px",
     borderRadius: "6px",
     cursor: "pointer",
+    transitionProperty: "background-color",
+    transitionDuration: "0.15s",
     "&:hover": {
       backgroundColor: tokens.colorNeutralBackground3Hover,
     },
   },
-  activeItem: {
+  itemActive: {
     backgroundColor: tokens.colorNeutralBackground3Selected,
+  },
+  itemIcon: {
+    fontSize: "16px",
+    color: tokens.colorNeutralForeground3,
+    flexShrink: 0,
   },
   itemText: {
     flex: 1,
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+    fontSize: "13px",
+    color: tokens.colorNeutralForeground2,
+  },
+  deleteBtn: {
+    opacity: 0,
+    transitionProperty: "opacity",
+    transitionDuration: "0.15s",
+    "&:hover": {
+      opacity: 1,
+    },
+  },
+  itemHover: {
+    "&:hover button": {
+      opacity: 1,
+    },
   },
 });
 
@@ -73,7 +104,7 @@ export function SessionList({
   return (
     <div className={styles.container}>
       <div className={styles.header}>
-        <Text weight="semibold">Sessions</Text>
+        <Text className={styles.headerTitle}>Sessions</Text>
         <Button
           appearance="subtle"
           icon={<AddRegular />}
@@ -86,10 +117,14 @@ export function SessionList({
         {sessions.map((session) => (
           <div
             key={session.session_id}
-            className={`${styles.item} ${session.session_id === activeSessionId ? styles.activeItem : ""}`}
+            className={mergeClasses(
+              styles.item,
+              styles.itemHover,
+              session.session_id === activeSessionId && styles.itemActive,
+            )}
             onClick={() => onSelect(session.session_id)}
           >
-            <ChatRegular />
+            <ChatRegular className={styles.itemIcon} />
             <span className={styles.itemText}>
               {session.session_name || "Untitled"}
             </span>
@@ -97,6 +132,7 @@ export function SessionList({
               appearance="subtle"
               icon={<DeleteRegular />}
               size="small"
+              className={styles.deleteBtn}
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete(session.session_id);
