@@ -1,0 +1,14 @@
+azure-functions==1.21.3
+azure-functions-durable==1.2.9
+azure-search-documents==11.6.0b8
+azure-storage-blob==12.24.0
+azure-data-tables==12.6.0
+azure-core==1.32.0
+openai==1.58.1
+PyMuPDF==1.25.1
+python-docx==1.1.2
+python-pptx==1.0.2
+pydantic==2.10.3
+pydantic-settings==2.7.0
+sqlalchemy==2.0.36
+pyodbc==5.2.0
