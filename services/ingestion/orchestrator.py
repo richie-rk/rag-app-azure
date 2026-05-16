@@ -4,7 +4,6 @@ Files already indexed under the same content hash are skipped, so re-running
 ingestion is idempotent.
 """
 
-import hashlib
 import logging
 import os
 import tempfile
