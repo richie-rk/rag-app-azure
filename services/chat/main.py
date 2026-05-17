@@ -1,7 +1,6 @@
 """FastAPI chat service. POST /chat streams an NDJSON response."""
 
 import logging
-import re
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,7 +30,7 @@ app = FastAPI(title="rag-app-azure Chat Service", version="1.0.0")
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins.split(","),
+    allow_origins=[origin.strip() for origin in settings.allowed_origins.split(",") if origin.strip()],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
     allow_credentials=True,
