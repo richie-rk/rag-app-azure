@@ -12,6 +12,7 @@ import azure.functions as func
 
 from services.shared.auth import extract_bearer_token, validate_jwt
 from services.shared.database import get_session_factory
+from services.shared.models import IngestionAudit, User, UserProjectAccess
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,50 @@ def _require_auth(req: func.HttpRequest) -> dict | func.HttpResponse:
 
 def _get_body(req: func.HttpRequest) -> dict:
     return req.get_json()
+
+
+def _user_can_access_project(session, email: str, project_id: int) -> bool:
+    """True if the user with this email has an access row for the project."""
+    user = session.query(User).filter(User.email == email).first()
+    if not user:
+        return False
+    access = (
+        session.query(UserProjectAccess)
+        .filter(
+            UserProjectAccess.user_id == user.id,
+            UserProjectAccess.project_id == project_id,
+        )
+        .first()
+    )
+    return access is not None
+
+
+def _user_can_access_file(session, email: str, file_name: str) -> bool:
+    """True if file_name was ingested into a project the user can access.
+
+    With a single shared blob container, ingestion_audit is the only record
+    of which project a file belongs to, so it is the authority for blob reads.
+    """
+    user = session.query(User).filter(User.email == email).first()
+    if not user:
+        return False
+    accessible_ids = [
+        row.project_id
+        for row in session.query(UserProjectAccess.project_id)
+        .filter(UserProjectAccess.user_id == user.id)
+        .all()
+    ]
+    if not accessible_ids:
+        return False
+    match = (
+        session.query(IngestionAudit)
+        .filter(
+            IngestionAudit.source_file == file_name,
+            IngestionAudit.project_id.in_(accessible_ids),
+        )
+        .first()
+    )
+    return match is not None
 
 
 # Project Endpoints
@@ -154,7 +199,8 @@ def get_sessions_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.sessions import get_sessions
 
-    username = req.params.get("username", "")
+    # Identity is the token subject, never a client-supplied query param.
+    username = claims["sub"]
     session_id = req.params.get("session_id")
     result = get_sessions(username, session_id)
     return _json_response(result)
@@ -185,8 +231,10 @@ def save_feedback_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.feedback import save_feedback
 
-    result = save_feedback(_get_body(req))
-    return _json_response(result)
+    # Pass the token subject so feedback can only touch the caller's own turn.
+    result = save_feedback(_get_body(req), claims["sub"])
+    status_code = 403 if "error" in result else 200
+    return _json_response(result, status_code)
 
 
 # Document Endpoint
@@ -202,17 +250,25 @@ def get_document_fn(req: func.HttpRequest) -> func.HttpResponse:
     from .endpoints.documents import get_document
 
     file_name = req.params.get("file_name", "")
-    container = req.params.get("container", "")
+    if not file_name:
+        return _json_response({"error": "file_name required"}, 400)
 
-    if not file_name or not container:
-        return _json_response({"error": "file_name and container required"}, 400)
+    factory = get_session_factory()
+    with factory() as session:
+        if not _user_can_access_file(session, claims["sub"], file_name):
+            # Uniform 404 whether the file is missing or simply off-limits, so
+            # the endpoint never confirms which filenames exist.
+            return _json_response({"error": "Document not found"}, 404)
 
-    content, content_type, name = get_document(file_name, container)
+    content, content_type, disposition = get_document(file_name)
     return func.HttpResponse(
         content,
         status_code=200,
         mimetype=content_type,
-        headers={"Content-Disposition": f'inline; filename="{name}"'},
+        headers={
+            "Content-Disposition": disposition,
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -231,6 +287,8 @@ def get_audit_info_fn(req: func.HttpRequest) -> func.HttpResponse:
     project_id = int(req.route_params["project_id"])
     factory = get_session_factory()
     with factory() as session:
+        if not _user_can_access_project(session, claims["sub"], project_id):
+            return _json_response({"error": "No access to this project"}, 403)
         result = get_audit_info(session, project_id)
     return _json_response(result)
 
@@ -249,7 +307,9 @@ def prompt_library_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     body = _get_body(req)
     request_type = body.get("request_type", "")
-    username = body.get("username", "")
+    # The prompt library is per-user; its owner is the token subject, never a
+    # body field, so one user cannot reach another user's library.
+    username = claims["sub"]
     project = body.get("project", "")
 
     if request_type == "create":
