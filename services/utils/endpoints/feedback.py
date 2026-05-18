@@ -12,11 +12,12 @@ from services.shared.config import get_settings
 logger = logging.getLogger(__name__)
 
 
-def save_feedback(data: dict) -> dict:
+def save_feedback(data: dict, caller_email: str) -> dict:
     """Upsert feedback for one chat turn.
 
     Feedback merges onto the turn's existing Table row; if the turn hasn't
-    been saved yet, the row is created here instead.
+    been saved yet, the row is created here instead. `caller_email` is the
+    authenticated user; feedback can only be written to that user's own turn.
     """
     settings = get_settings()
     table_service = get_table_service_client()
@@ -35,13 +36,15 @@ def save_feedback(data: dict) -> dict:
             partition_key=entity["PartitionKey"],
             row_key=entity["RowKey"],
         )
+        if existing.get("username") != caller_email:
+            return {"error": "Cannot leave feedback on another user's turn"}
         existing.update(entity)
         table_client.update_entity(entity=existing, mode=UpdateMode.MERGE)
     except ResourceNotFoundError:
         # Entity doesn't exist yet, so create it with full data
         entity.update({
             "session_name": data.get("session_name", ""),
-            "username": data.get("username", ""),
+            "username": caller_email,
             "conversation": json.dumps({
                 "user_query": data.get("user_query", ""),
                 "bot": data.get("bot_response", ""),
