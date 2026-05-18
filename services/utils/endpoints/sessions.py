@@ -53,7 +53,11 @@ def save_session(data: dict) -> dict:
 
 
 def get_sessions(username: str, session_id: str | None = None) -> list[dict]:
-    """Chat turns for a user, or for a single session when session_id is given."""
+    """Turns owned by `username`, or that user's turns within one session.
+
+    A session_id query targets a whole session by partition key and is not
+    user-scoped, so per-row ownership is enforced in the loop below.
+    """
     table_client = _get_table_client()
 
     if session_id:
@@ -65,6 +69,9 @@ def get_sessions(username: str, session_id: str | None = None) -> list[dict]:
 
     sessions = []
     for entity in entities:
+        if entity.get("username") != username:
+            # Skip turns the caller doesn't own (reachable via session_id).
+            continue
         conversation = json.loads(entity.get("conversation", "{}"))
         sessions.append({
             "session_id": entity.get("PartitionKey", ""),
