@@ -31,12 +31,14 @@ def provision_user(session: Session, data: dict) -> dict:
             user.display_name = data["display_name"]
         session.commit()
     else:
-        # Create new user
+        # Create new user. Role is derived from auth_type, never taken from
+        # the request body, so a caller cannot self-assign the admin role.
+        auth_type = data.get("auth_type", "sso")
         user = User(
             email=email,
             display_name=data.get("display_name", email.split("@")[0]),
-            auth_type=data.get("auth_type", "sso"),
-            role=data.get("role", "user"),
+            auth_type=auth_type,
+            role="guest" if auth_type == "magic_link" else "user",
             last_login=datetime.now(timezone.utc),
         )
         session.add(user)
