@@ -1,124 +1,128 @@
-# RAG App Azure
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<div align="center">
 
-A production-grade Retrieval-Augmented Generation (RAG) application on Azure, featuring hybrid search, NDJSON streaming, MSAL SSO authentication, and a multi-service architecture for enterprise document Q&A.
+# RAG App Azure
+
+A Retrieval-Augmented Generation (RAG) app built on Azure. Upload documents and ask questions about them in natural language.
+
+![Azure](https://img.shields.io/badge/Azure-0078D4?style=for-the-badge)
+![Azure OpenAI](https://img.shields.io/badge/Azure_OpenAI-0078D4?style=for-the-badge)
+![Azure AI Search](https://img.shields.io/badge/Azure_AI_Search-0078D4?style=for-the-badge)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](https://opensource.org/licenses/MIT)
+
+</div>
+
+> **Note:** This is a work in progress and under active development and a lot of work remaining to make it production-safe. If you spot a bug, please [open an issue](https://github.com/richie-rk/rag-app-azure/issues).
 
 ## Table of Contents
-- [Overview](#overview)
-- [Features](#features)
-- [Application Interface](#application-interface)
+
+- [About the Project](#about-the-project)
+  - [Screenshots](#screenshots)
+  - [Tech Stack](#tech-stack)
+  - [Features](#features)
 - [Architecture](#architecture)
-- [Installation](#installation)
-- [Usage](#usage)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Run Locally](#run-locally)
 - [Configuration](#configuration)
+- [Usage](#usage)
+- [Deployment](#deployment)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgements](#acknowledgements)
 
-## Overview
+## About the Project
 
-RAG App Azure is a full-stack enterprise knowledge management platform that lets users upload documents, index them into Azure AI Search, and query them with natural language using GPT-4o. It combines vector search, semantic reranking, and BM25 keyword search for superior retrieval accuracy.
+The purpose of this project is to build an enterprise RAG application on Azure. It lets you upload documents and ask questions about them. Retrieval combines vector search, BM25 keyword matching, and a semantic reranker in a single Azure AI Search query, so answers stay grounded in your own content.
 
-The system is designed for multi-tenant organizations with project-based document isolation, role-based access control, session history, and feedback tracking, all deployed on Azure with infrastructure-as-code.
+Documents are grouped into projects. Each project has its own search index, system prompt, and access list, so different groups of users can work with separate document sets in one deployment.
 
-## Features
+### Screenshots
 
-- **Hybrid Search RAG**: Combines Azure AI Search vector search, BM25 keyword matching, and semantic reranking for best-in-class retrieval
-- **NDJSON Streaming**: Real-time token-by-token chat responses via streaming JSON lines (not SSE)
-- **Dual Authentication**: Microsoft Entra ID SSO (MSAL) for corporate users + magic link email for guest access
-- **Multi-Project Isolation**: Each project has its own search index, documents, system prompt, and LLM deployment
-- **Document Ingestion Pipeline**: Azure Durable Functions orchestration with support for PDF, DOCX, PPTX, TXT, MD, code files, and video/audio
-- **Fluent UI 9 Frontend**: Clean Microsoft Teams-like interface with React, TypeScript, and Vite
-- **Session Management**: Full chat history with save, load, and delete via Azure Table Storage
-- **Feedback System**: Thumbs up/down on assistant responses for quality tracking
-- **Citation Attribution**: Source document references with clickable links to original content
-- **Follow-up Questions**: AI-generated follow-up suggestions after each response
-- **Role-Based Access**: Admin vs user roles with conditional UI (user management page admin-only)
-- **Infrastructure as Code**: Azure Bicep templates for repeatable deployment
-
-## Application Interface
-
-The UI is built with React 18 and Fluent UI 9, following the Microsoft Teams design language. It supports both light and dark themes with automatic system preference detection.
-
-### Login
-
-Centered authentication card with Microsoft Entra ID SSO and magic link email sign-in for guest access.
+**Login.** Microsoft Entra ID SSO and magic-link email sign-in.
 
 ![Login](docs/images/ui-login-dark.png)
 
-### Chat
-
-Three-column layout with session history, message area with streaming responses and follow-up suggestions, and a toggleable citation panel showing source documents.
+**Chat.** Streaming answers with citations and follow-up suggestions, alongside a source panel.
 
 ![Chat](docs/images/ui-chat-dark.png)
 
-### Projects
-
-Card grid displaying all projects with chunking strategy, LLM deployment, and default badges. Includes empty state for new deployments.
+**Projects.** A card grid of every project with its chunking strategy and LLM deployment.
 
 ![Projects](docs/images/ui-projects-dark.png)
 
-### Create / Edit Project
-
-Form for configuring project name, department, system prompt, chunking strategy, and LLM deployment.
+**Create / Edit Project.** A form for the project name, department, system prompt, chunking strategy, and LLM deployment.
 
 ![Create Project](docs/images/ui-create-project-dark.png)
 
-### Data Loader
-
-Drag-and-drop file upload zone with project selector and ingestion status table showing per-file processing state.
+**Data Loader.** Drag-and-drop upload with a per-file ingestion status table.
 
 ![Data Loader](docs/images/ui-dataloader-dark.png)
 
-### Settings
-
-Stacked configuration cards for profile, appearance (theme toggle), default chat parameters (temperature, top-K), and application info.
+**Settings.** Profile, theme, and default chat parameters.
 
 ![Settings](docs/images/ui-settings-dark.png)
 
+### Tech Stack
+
+<details>
+<summary>Frontend</summary>
+
+- React 18 and TypeScript
+- Fluent UI 9
+- Vite
+- MSAL for Microsoft Entra ID sign-in
+
+</details>
+
+<details>
+<summary>Backend</summary>
+
+- Python 3.10+
+- FastAPI (chat service)
+- Azure Functions v2, Python (utils and ingestion)
+- Azure Durable Functions (ingestion pipeline)
+- SQLAlchemy
+
+</details>
+
+<details>
+<summary>Data and AI</summary>
+
+- Azure OpenAI (gpt-4o, text-embedding-ada-002)
+- Azure AI Search (vector, BM25, semantic reranker)
+- Azure SQL Database
+- Azure Blob Storage
+- Azure Table Storage
+
+</details>
+
+<details>
+<summary>Infrastructure</summary>
+
+- Azure App Service and Azure Function Apps
+- Bicep templates with PowerShell provisioning scripts
+
+</details>
+
+### Features
+
+- **Hybrid retrieval** that combines vector search, BM25 keyword matching, and a semantic reranker in one Azure AI Search query.
+- **Streaming answers** sent as NDJSON and rendered token by token in the UI.
+- **Two sign-in options**, Microsoft Entra ID SSO for organization accounts and magic-link email for guests.
+- **Project isolation**, where each project has its own search index, documents, system prompt, and LLM deployment.
+- **Document ingestion** through an Azure Durable Functions pipeline for PDF, DOCX, PPTX, and text-based files.
+- **Chat history** saved to Azure Table Storage, with save, load, and delete.
+- **Feedback** with a thumbs up or down on each answer.
+- **Citations** that link answers back to their source documents.
+- **Follow-up questions** suggested after each answer.
+- **Role-based access**, with the user management page limited to admins.
+- **Infrastructure as code** using Bicep templates and PowerShell scripts.
+
 ## Architecture
 
-The system uses a microservices architecture with four independent services:
-
-### **Chat Service** (`services/chat/`)
-- **FastAPI** application deployed as Azure App Service
-- Hybrid search: vector + text + semantic reranker via Azure AI Search
-- NDJSON streaming responses with follow-up question extraction
-- Query-to-search-index routing per project
-- Gunicorn + Uvicorn workers for production
-
-### **Ingestion Service** (`services/ingestion/`)
-- **Azure Durable Functions** (containerized) with orchestrator/activity pattern
-- Document parsing via Azure Document Intelligence (Form Recognizer) or local Unstructured library
-- Page-wise and sliding-window chunking strategies
-- Embeddings via Azure OpenAI `text-embedding-ada-002`
-- HyDE (Hypothetical Document Embedding) indexing option
-- Audit logging per document to SQL
-
-### **Utils Service** (`services/utils/`)
-- **Azure Function App** with RESTful HTTP endpoints
-- Project CRUD, user provisioning, session save/load/delete
-- Feedback storage, ingestion audit queries, prompt library
-- Centralized auth token validation
-
-### **UI** (`ui/`)
-- **React 18** + **Fluent UI 9** + **TypeScript** + **Vite 6**
-- MSAL SSO redirect flow + magic link guest auth
-- Streaming chat with citation panel, feedback buttons, follow-up suggestions
-- Project management, data loader with audit table, user management (admin)
-- Zero template bloat: 32 source files, ~1,780 lines total
-
-### **Shared Library** (`services/shared/`)
-- SQLAlchemy models, Azure client factories, auth middleware, config loader
-- Shared across chat, ingestion, and utils services
-
-```
-rag-app-azure/
-├── services/
-│   ├── shared/          # Config, DB models, auth, Azure clients
-│   ├── chat/            # FastAPI RAG chat service
-│   ├── ingestion/       # Durable Functions document pipeline
-│   └── utils/           # Azure Functions utility endpoints
-├── ui/                  # React + Fluent UI 9
-└── infra/               # Azure Bicep IaC templates
-```
+The app is made of four services (chat, ingestion, utils, and the UI) plus a shared Python library. The chat and ingestion paths are independent: ingestion writes documents and embeddings into a project's search index, and chat reads from it.
 
 ```mermaid
 graph TB
@@ -169,152 +173,75 @@ graph TB
     INGEST --> SQL
 ```
 
-## Installation
+For the per-service breakdown, repository layout, and the full API reference, see [docs/architecture.md](docs/architecture.md).
+
+## Getting Started
 
 ### Prerequisites
+
 - Python 3.10+
 - Node.js 18+
-- Azure CLI (`az`)
-- Azure Functions Core Tools (`func`)
-- An Azure subscription with these resources provisioned:
-  - Azure OpenAI (with `text-embedding-ada-002` and `gpt-4o` deployments)
-  - Azure AI Search
-  - Azure SQL Database
-  - Azure Storage Account (Blob + Table)
-  - Azure App Service (for chat + UI)
-  - Azure Function App (for utils + ingestion)
-  - Microsoft Entra ID App Registration (for SSO)
+- [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`)
+- [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local) (`func`)
+- An Azure subscription with: Azure OpenAI (with `gpt-4o` and `text-embedding-ada-002` deployments), Azure AI Search, Azure SQL Database, a Storage account (Blob and Table), and a Microsoft Entra ID app registration for SSO.
 
-### Setup
+### Installation
 
-1. **Clone the repository:**
+1. Clone the repository:
+
    ```bash
    git clone https://github.com/richie-rk/rag-app-azure.git
    cd rag-app-azure
    ```
 
-2. **Configure environment variables:**
+2. Install backend dependencies, ideally into a virtual environment:
+
+   ```bash
+   pip install -r services/chat/requirements.txt
+   pip install -r services/utils/requirements.txt
+   pip install -r services/ingestion/requirements.txt
+   ```
+
+3. Install frontend dependencies:
+
+   ```bash
+   cd ui && npm install
+   ```
+
+4. Create your `.env` file (see [Configuration](#configuration)):
+
    ```bash
    cp .env.example .env
-   # Edit .env with your Azure resource values
    ```
 
-3. **Install backend dependencies:**
-   ```bash
-   # Chat service
-   cd services/chat
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -r requirements.txt
+The database tables are created automatically by SQLAlchemy on first run, so there is no separate migration step.
 
-   # Utils service
-   cd ../utils
-   pip install -r requirements.txt
-   ```
+### Run Locally
 
-4. **Install frontend dependencies:**
-   ```bash
-   cd ui
-   npm install
-   ```
-
-5. **Set up the database:**
-   ```bash
-   # The shared library auto-creates tables via SQLAlchemy on first run.
-   # Ensure DATABASE_URL is set in .env before starting any service.
-   ```
-
-6. **Configure frontend environment:**
-   ```bash
-   # Create ui/.env with frontend-specific vars
-   cat > ui/.env << 'EOF'
-   VITE_CHAT_API_URL=http://localhost:8000
-   VITE_UTILS_API_URL=http://localhost:7071/api
-   VITE_MSAL_CLIENT_ID=<your-entra-app-client-id>
-   VITE_MSAL_TENANT_ID=<your-entra-tenant-id>
-   VITE_MSAL_REDIRECT_URI=http://localhost:5173
-   EOF
-   ```
-
-## Usage
-
-### Quick Start
-
-1. **Start the chat service** (run from the **repository root**, not from `services/chat/`, since the chat module uses `from services.shared.*` imports that only resolve when `services` is on the Python path as a namespace package):
-   ```bash
-   source services/chat/venv/bin/activate    # Windows: services\chat\venv\Scripts\activate
-   uvicorn services.chat.main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
-2. **Start the utils service (separate terminal):**
-   ```bash
-   cd services/utils
-   func start
-   ```
-   The ingestion service also defaults to port 7071, so if you need both running locally, start one of them with `func start --port 7072`.
-
-3. **Start the frontend (separate terminal):**
-   ```bash
-   cd ui
-   npm run dev
-   ```
-
-4. **Access the application:**
-   - **UI**: http://localhost:5173
-   - **Chat API docs**: http://localhost:8000/docs
-   - **Utils API**: http://localhost:7071/api
-
-### API Endpoints
-
-**Chat Service** (`POST /chat`):
-- Accepts `ChatRequest` with history, search_index, username, overrides
-- Returns NDJSON streaming response with content deltas, data points, and follow-up questions
-
-**Utils Service**:
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/projects` | GET | List projects |
-| `/api/projects` | POST | Create project |
-| `/api/projects/:id` | PUT | Update project |
-| `/api/sessions` | GET | List sessions / get messages |
-| `/api/sessions` | POST | Save session |
-| `/api/sessions/:id` | DELETE | Delete session |
-| `/api/users` | GET | List users |
-| `/api/users/provision` | POST | Provision/upsert user |
-| `/api/feedback` | POST | Save feedback |
-| `/api/ingest` | POST | Trigger document ingestion |
-| `/api/audit/:projectId` | GET | Get ingestion audit info |
-| `/api/auth/magic-link` | POST | Send magic link email |
-| `/api/auth/verify` | GET | Verify magic link token |
-
-### Deployment to Azure
+Start each service in its own terminal, from the repository root.
 
 ```bash
-# Deploy infrastructure (Bicep)
-az deployment sub create --location westus3 --template-file infra/main.bicep
+# Chat service on port 8000. Running from the repository root keeps the
+# services.shared imports resolvable as a namespace package.
+uvicorn services.chat.main:app --reload --port 8000
 
-# Deploy chat service
-cd services/chat
-az webapp deployment source config-zip --resource-group <rg> --name <webapp> --src build.zip
+# Utils service on port 7071
+cd services/utils && func start
 
-# Deploy utils service
-cd services/utils
-func azure functionapp publish <function-app-name>
-
-# Deploy UI
-cd ui
-npm run build
-az webapp deployment source config-zip --resource-group <rg> --name <webapp> --src dist.zip
+# Frontend on port 5173
+cd ui && npm run dev
 ```
+
+The ingestion service also defaults to port 7071, so run it on a different port if you need it next to utils: `func start --port 7072`.
+
+Then open the UI at http://localhost:5173.
 
 ## Configuration
 
-The application is fully configurable through environment variables or a `.env` file:
-
-### Environment Variables
+Backend settings live in a `.env` file at the repository root. Copy `.env.example` and fill in your Azure values:
 
 ```bash
-# Database
+# Database (SQLAlchemy connection string for Azure SQL)
 DATABASE_URL=mssql+pyodbc://<user>:<pass>@<server>.database.windows.net:1433/<db>?driver=ODBC+Driver+18+for+SQL+Server
 
 # Azure OpenAI
@@ -335,20 +262,18 @@ DEFAULT_BLOB_CONTAINER=documents
 AZURE_TABLE_NAME=chatsessions
 
 # Authentication
-JWT_SECRET=<generate-a-strong-random-secret>
+JWT_SECRET=<a-strong-random-secret>
 MAGIC_LINK_BASE_URL=https://<your-domain>/auth/verify
 MSAL_CLIENT_ID=<entra-app-client-id>
 MSAL_TENANT_ID=<entra-tenant-id>
 ALLOWED_AD_GROUPS=<comma-separated-group-ids>
 
-# Search Defaults
+# Search defaults and CORS
 DEFAULT_TOP_K=10
-
-# CORS
 ALLOWED_ORIGINS=http://localhost:5173
 ```
 
-### Frontend Environment Variables (ui/.env)
+The frontend reads its own variables from `ui/.env`, all prefixed `VITE_`:
 
 ```bash
 VITE_CHAT_API_URL=http://localhost:8000
@@ -358,6 +283,45 @@ VITE_MSAL_TENANT_ID=<entra-tenant-id>
 VITE_MSAL_REDIRECT_URI=http://localhost:5173
 ```
 
----
+## Usage
 
-Built for enterprise knowledge management on Azure.
+With the services running, open the UI, sign in, and create a project. Upload documents on the Data Loader page, wait for ingestion to finish, then ask questions on the Chat page.
+
+The chat service exposes one endpoint, `POST /chat`, which takes the conversation history and a target search index and returns an NDJSON stream of answer text, citations, and follow-up questions. The utils service provides the REST API behind the UI. The full endpoint list is in [docs/architecture.md](docs/architecture.md#api-reference).
+
+## Deployment
+
+Azure resources are provisioned with the scripts in `infra/`:
+
+```bash
+cd infra
+pwsh ./provision-azure.ps1   # create all resources
+pwsh ./teardown-azure.ps1    # remove them
+```
+
+After provisioning, deploy each service: a zip deploy for the chat service and the built UI, and `func azure functionapp publish` for the utils and ingestion Function Apps.
+
+## Roadmap
+
+- [x] Page-wise chunking
+- [ ] Semantic chunking, splitting on meaning boundaries
+- [ ] Recursive chunking, with configurable chunk size and overlap
+
+Page-wise is the only chunking strategy implemented right now. I'm looking at adding semantic chunking and other options next.
+
+## Contributing
+
+This is a personal project and still changing. To suggest a feature or change:
+
+1. Open an issue describing the proposal.
+2. Once it has been discussed and tagged as accepted, it is ready to be picked up as a pull request.
+
+Opening the issue first keeps the discussion on the proposal before any code gets written.
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+- [azure-search-openai-demo](https://github.com/Azure-Samples/azure-search-openai-demo), Microsoft's Azure-Samples RAG sample for Azure OpenAI and Azure AI Search, used as a reference while building this project.
