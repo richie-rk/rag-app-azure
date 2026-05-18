@@ -36,7 +36,7 @@ A Retrieval-Augmented Generation (RAG) app built on Azure. Upload documents and 
 
 The purpose of this project is to build an enterprise RAG application on Azure. It lets you upload documents and ask questions about them. Retrieval combines vector search, BM25 keyword matching, and a semantic reranker in a single Azure AI Search query, so answers stay grounded in your own content.
 
-Documents are grouped into projects. Each project has its own search index, system prompt, and access list, so different groups of users can work with separate document sets in one deployment.
+The app is multi-tenant at the project level. Documents are grouped into projects, and each project is mapped to its own search index, system prompt, and access list, so different groups of users can work with separate document sets in one deployment.
 
 ### Screenshots
 
