@@ -1,6 +1,6 @@
 <div align="center">
+<img src="docs/rag-app-azure-header.png" alt="RAG App Azure" width="100%" />
 
-# RAG App Azure
 
 A Retrieval-Augmented Generation (RAG) app built on Azure. Upload documents and ask questions about them in natural language.
 
