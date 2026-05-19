@@ -6,6 +6,7 @@ import {
   Divider,
 } from "@fluentui/react-components";
 import { DocumentRegular } from "@fluentui/react-icons";
+import { parseSourcePage } from "../utils/markdown";
 
 const useStyles = makeStyles({
   panel: {
@@ -65,6 +66,10 @@ const useStyles = makeStyles({
       textDecorationLine: "underline",
     },
   },
+  pageLabel: {
+    fontSize: "11px",
+    color: tokens.colorNeutralForeground3,
+  },
   preview: {
     fontSize: "12px",
     color: tokens.colorNeutralForeground3,
@@ -95,6 +100,7 @@ export function CitationPanel({ dataPoints, visible, onCitationClick }: Props) {
         {dataPoints.map((dp, i) => {
           const [source, ...contentParts] = dp.split(":");
           const content = contentParts.join(":").trim();
+          const { sourcefile, page } = parseSourcePage(source);
           return (
             <div key={i} className={styles.item}>
               <DocumentRegular className={styles.itemIcon} />
@@ -103,8 +109,11 @@ export function CitationPanel({ dataPoints, visible, onCitationClick }: Props) {
                   className={styles.sourceName}
                   onClick={() => onCitationClick?.(source)}
                 >
-                  {source}
+                  {sourcefile}
                 </Link>
+                {page != null && (
+                  <Text className={styles.pageLabel}>Page {page}</Text>
+                )}
                 {content && (
                   <div className={styles.preview}>
                     {content.length > 200

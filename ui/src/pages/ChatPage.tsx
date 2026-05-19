@@ -21,6 +21,8 @@ import { useProjects } from "../hooks/useProjects";
 import { useSessions } from "../hooks/useSessions";
 import { useAuth } from "../hooks/useAuth";
 import { saveSession } from "../api/sessions";
+import { fetchDocumentBlob } from "../api/documents";
+import { parseSourcePage } from "../utils/markdown";
 import type { ChatMessage as ChatMessageType, ChatTurn } from "../api/types";
 
 const useStyles = makeStyles({
@@ -100,7 +102,7 @@ export function ChatPage() {
   const styles = useStyles();
   const { sessionId } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const { projects, selectedProject, setSelectedProject } = useProjects();
   const { sessions, refresh: refreshSessions, removeSession, loadSessionHistory } = useSessions();
   const { sendMessage, isStreaming, streamingContent, dataPoints, followupQuestions } = useStreamChat();
@@ -191,6 +193,31 @@ export function ChatPage() {
       }
     },
     [selectedProject, user, messages, currentSessionId, sendMessage, refreshSessions],
+  );
+
+  const handleCitationClick = useCallback(
+    async (sourcepage: string) => {
+      if (!token) return;
+      // Open the tab synchronously, inside the click gesture: opening it after
+      // the await below would trip the popup blocker.
+      const win = window.open("about:blank", "_blank");
+      try {
+        const { sourcefile, page } = parseSourcePage(sourcepage);
+        const blob = await fetchDocumentBlob(sourcefile, token);
+        const url = URL.createObjectURL(blob);
+        const target = page != null ? `${url}#page=${page}` : url;
+        if (win) win.location.href = target;
+        else window.open(target, "_blank");
+        // Release the blob once the tab has had time to load it.
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+      } catch (err) {
+        win?.close();
+        setChatError(
+          err instanceof Error ? err.message : "Could not open the document.",
+        );
+      }
+    },
+    [token],
   );
 
   const handleNewSession = () => {
@@ -310,7 +337,11 @@ export function ChatPage() {
           }
         />
       </div>
-      <CitationPanel dataPoints={dataPoints} visible={showCitations} />
+      <CitationPanel
+        dataPoints={dataPoints}
+        visible={showCitations}
+        onCitationClick={handleCitationClick}
+      />
     </div>
   );
 }
