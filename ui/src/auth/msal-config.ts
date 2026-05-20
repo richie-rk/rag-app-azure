@@ -17,3 +17,11 @@ export const msalInstance = new PublicClientApplication(msalConfig);
 export const loginRequest = {
   scopes: ["User.Read", "GroupMember.Read.All"],
 };
+
+// Scopes for the backend API. VITE_API_SCOPE must be the URI of an exposed
+// scope on the App Registration, for example `api://<client-id>/access_as_user`.
+// The token returned for this request is what backends validate via JWKS. See
+// ADR-0003.
+export const apiRequest = {
+  scopes: [import.meta.env.VITE_API_SCOPE || ""],
+};
