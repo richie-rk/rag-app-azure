@@ -31,14 +31,21 @@ def _json_response(data, status_code=200):
 
 
 def _require_auth(req: func.HttpRequest) -> dict | func.HttpResponse:
-    """Validate JWT from Authorization header. Returns claims or 401."""
+    """Validate JWT and require a role. Returns claims, 401, or 403."""
     token = extract_bearer_token(req.headers.get("Authorization"))
     if not token:
         return _json_response({"error": "Missing authorization"}, 401)
     try:
-        return validate_jwt(token)
+        claims = validate_jwt(token)
     except Exception:
         return _json_response({"error": "Invalid token"}, 401)
+    if not claims.get("role"):
+        # AAD-authenticated but in neither configured group. The frontend
+        # shows a "contact your administrator" page on this code. See ADR-0003.
+        return _json_response(
+            {"error": "Not authorized", "code": "no_group"}, 403
+        )
+    return claims
 
 
 def _get_body(req: func.HttpRequest) -> dict:
@@ -153,9 +160,18 @@ def provision_user_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.users import provision_user
 
+    # display_name is the only body field still consulted, and only as a
+    # fallback when the token does not carry a `name` claim. Identity comes
+    # from the validated token, never the body.
+    try:
+        body = _get_body(req) or {}
+    except Exception:
+        body = {}
+    display_name = body.get("display_name") or claims.get("display_name", "")
+
     factory = get_session_factory()
     with factory() as session:
-        result = provision_user(session, _get_body(req))
+        result = provision_user(session, claims, display_name=display_name)
     return _json_response(result)
 
 

@@ -8,7 +8,7 @@ import {
 } from "react";
 import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
-import { loginRequest } from "./msal-config";
+import { apiRequest, loginRequest } from "./msal-config";
 import { fetchUserProfile, type UserProfile } from "./graph-service";
 import { apiClient } from "../api/client";
 
@@ -52,26 +52,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async function initAuth() {
       if (isMsalAuthenticated && accounts.length > 0) {
         try {
-          const response = await instance.acquireTokenSilent({
+          // Graph token: used locally to call /me for the user profile.
+          const graphResponse = await instance.acquireTokenSilent({
             ...loginRequest,
             account: accounts[0],
           });
-          const accessToken = response.accessToken;
+          const graphToken = graphResponse.accessToken;
 
-          const profile = await fetchUserProfile(accessToken);
+          const profile = await fetchUserProfile(graphToken);
           setUser(profile);
 
-          // Provision user on backend
+          // API token: different audience, sent as the bearer to backends.
+          // Backends validate it via JWKS and read the groups claim for the
+          // platform role; see ADR-0003.
+          const apiResponse = await instance.acquireTokenSilent({
+            ...apiRequest,
+            account: accounts[0],
+          });
+          const apiToken = apiResponse.accessToken;
+
           const result = await apiClient("/users/provision", {
             method: "POST",
-            body: JSON.stringify({
-              email: profile.mail,
-              display_name: profile.displayName,
-              auth_type: "sso",
-            }),
-            token: accessToken,
+            body: JSON.stringify({ display_name: profile.displayName }),
+            token: apiToken,
           });
-          setToken(accessToken);
+          setToken(apiToken);
           setRole(result.role || "user");
         } catch (err) {
           console.error("Auth init failed:", err);

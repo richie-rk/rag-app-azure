@@ -31,10 +31,18 @@ class Settings(BaseSettings):
 
     # Authentication
     jwt_secret: str
+    jwt_audience: str = "rag-app-azure"
+    jwt_issuer: str = "rag-app-azure"
     magic_link_base_url: str = "http://localhost:5173/auth/verify"
     msal_client_id: str = ""
     msal_tenant_id: str = ""
-    allowed_ad_groups: list[str] = []
+    # Audience expected on inbound Azure AD access tokens. Typically the
+    # App Registration client ID or its api://<client-id> URI.
+    api_audience: str = ""
+    # Object IDs of the two security groups whose transitive membership maps
+    # to a platform role. See ADR-0003.
+    azure_ad_admin_group_id: str = ""
+    azure_ad_user_group_id: str = ""
 
     # Search Defaults
     default_top_k: int = 10

@@ -41,14 +41,18 @@ app.add_middleware(
 
 
 async def require_auth(request: Request) -> dict:
-    """Validate JWT from Authorization header."""
+    """Validate JWT and require a role."""
     token = extract_bearer_token(request.headers.get("Authorization"))
     if not token:
         raise HTTPException(status_code=401, detail="Missing authorization token")
     try:
-        return validate_jwt(token)
+        claims = validate_jwt(token)
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if not claims.get("role"):
+        # AAD-authenticated but in neither configured group; see ADR-0003.
+        raise HTTPException(status_code=403, detail="Not authorized: no group membership")
+    return claims
 
 
 # Routes

@@ -14,54 +14,93 @@ from services.shared.models import Project, User, UserProjectAccess
 logger = logging.getLogger(__name__)
 
 
-def provision_user(session: Session, data: dict) -> dict:
-    """Create or update a user on first login. Grants default project access.
+def _ensure_main_project(session: Session) -> None:
+    """Create the canonical 'main' default project if none exists.
 
-    Args:
-        data: {email, display_name, auth_type, role}
+    Every authenticated user gets viewer access to a default project, and
+    'main' is the bootstrap default when the projects table has none. See
+    ADR-0003.
     """
-    email = data["email"].lower()
+    existing = session.query(Project).filter(Project.is_default == True).first()
+    if existing:
+        return
+
+    main = Project(
+        name="main",
+        display_name="Main",
+        index_name="main-index",
+        department="",
+        system_prompt="",
+        example_questions="[]",
+        chunking_strategy="page_wise",
+        search_strategy="hybrid",
+        llm_deployment="gpt-4o",
+        is_default=True,
+        is_active=True,
+    )
+    session.add(main)
+    session.flush()
+    logger.info("Bootstrapped default project 'main'")
+
+
+def provision_user(
+    session: Session, claims: dict, display_name: str = ""
+) -> dict:
+    """Create or update a user from validated claims; ensure default access.
+
+    Identity (email, role, auth_type) is taken only from the validated token,
+    never from a request body. The DB role column is refreshed on every login
+    so it stays a usable cache for admin views. See ADR-0003.
+    """
+    email = claims["sub"].lower()
+    role = claims["role"]
+    auth_type = claims.get("auth_type", "sso")
+
+    _ensure_main_project(session)
 
     user = session.query(User).filter(User.email == email).first()
-
     if user:
-        # Update last login
         user.last_login = datetime.now(timezone.utc)
-        if data.get("display_name"):
-            user.display_name = data["display_name"]
-        session.commit()
+        user.role = role
+        if display_name:
+            user.display_name = display_name
     else:
-        # Create new user. Role is derived from auth_type, never taken from
-        # the request body, so a caller cannot self-assign the admin role.
-        auth_type = data.get("auth_type", "sso")
         user = User(
             email=email,
-            display_name=data.get("display_name", email.split("@")[0]),
+            display_name=display_name or email.split("@")[0],
             auth_type=auth_type,
-            role="guest" if auth_type == "magic_link" else "user",
+            role=role,
             last_login=datetime.now(timezone.utc),
         )
         session.add(user)
         session.flush()
+        logger.info("Provisioned new user '%s'", email)
 
-        # Grant access to all default projects
-        default_projects = (
-            session.query(Project)
-            .filter(Project.is_default == True, Project.is_active == True)
-            .all()
-        )
-        for project in default_projects:
-            access = UserProjectAccess(
-                user_id=user.id,
-                project_id=project.id,
-                role="viewer",
+    # Grant viewer access to every default project the user does not already
+    # have. Idempotent: existing access rows are left alone.
+    default_projects = (
+        session.query(Project)
+        .filter(Project.is_default == True, Project.is_active == True)
+        .all()
+    )
+    for project in default_projects:
+        already = (
+            session.query(UserProjectAccess)
+            .filter(
+                UserProjectAccess.user_id == user.id,
+                UserProjectAccess.project_id == project.id,
             )
-            session.add(access)
+            .first()
+        )
+        if not already:
+            session.add(
+                UserProjectAccess(
+                    user_id=user.id, project_id=project.id, role="viewer"
+                )
+            )
 
-        session.commit()
-        logger.info("Provisioned new user '%s' with %d default projects", email, len(default_projects))
+    session.commit()
 
-    # Return user info + accessible projects
     project_access = (
         session.query(Project)
         .join(UserProjectAccess)
