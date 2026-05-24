@@ -48,6 +48,18 @@ def _require_auth(req: func.HttpRequest) -> dict | func.HttpResponse:
     return claims
 
 
+def _require_non_guest(req: func.HttpRequest) -> dict | func.HttpResponse:
+    """Like _require_auth, but also rejects guest (view-only) users."""
+    claims = _require_auth(req)
+    if isinstance(claims, func.HttpResponse):
+        return claims
+    if claims.get("role") == "guest":
+        return _json_response(
+            {"error": "Read-only access for guest users"}, 403
+        )
+    return claims
+
+
 def _get_body(req: func.HttpRequest) -> dict:
     return req.get_json()
 
@@ -196,7 +208,7 @@ def list_users_fn(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name("save_session")
 @app.route(route="sessions", methods=["POST"])
 def save_session_fn(req: func.HttpRequest) -> func.HttpResponse:
-    claims = _require_auth(req)
+    claims = _require_non_guest(req)
     if isinstance(claims, func.HttpResponse):
         return claims
 
@@ -241,7 +253,7 @@ def delete_session_fn(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name("save_feedback")
 @app.route(route="feedback", methods=["POST"])
 def save_feedback_fn(req: func.HttpRequest) -> func.HttpResponse:
-    claims = _require_auth(req)
+    claims = _require_non_guest(req)
     if isinstance(claims, func.HttpResponse):
         return claims
 
@@ -327,6 +339,10 @@ def prompt_library_fn(req: func.HttpRequest) -> func.HttpResponse:
     # body field, so one user cannot reach another user's library.
     username = claims["sub"]
     project = body.get("project", "")
+
+    # Guests are view-only: they may read the library but not write to it.
+    if request_type in ("create", "update") and claims.get("role") == "guest":
+        return _json_response({"error": "Read-only access for guest users"}, 403)
 
     if request_type == "create":
         result = create_prompt(username, project, body["prompt_name"], body["prompt_content"])
