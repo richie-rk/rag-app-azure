@@ -55,6 +55,16 @@ async def require_auth(request: Request) -> dict:
     return claims
 
 
+async def require_non_guest(claims: dict = Depends(require_auth)) -> dict:
+    """Reject guest (view-only) users. Chat is not available to them."""
+    if claims.get("role") == "guest":
+        raise HTTPException(
+            status_code=403,
+            detail="Read-only access: chat is not available to guest users",
+        )
+    return claims
+
+
 # Routes
 
 
@@ -64,7 +74,7 @@ async def health():
 
 
 @app.post("/chat")
-async def chat(body: ChatRequest, claims: dict = Depends(require_auth)):
+async def chat(body: ChatRequest, claims: dict = Depends(require_non_guest)):
     """RAG chat endpoint. Returns NDJSON streaming response."""
 
     query = body.history[-1].user
