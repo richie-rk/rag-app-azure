@@ -10,7 +10,7 @@ import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { apiRequest, loginRequest } from "./msal-config";
 import { fetchUserProfile, type UserProfile } from "./graph-service";
-import { apiClient } from "../api/client";
+import { ApiError, apiClient } from "../api/client";
 
 interface AuthState {
   isAuthenticated: boolean;
@@ -18,6 +18,7 @@ interface AuthState {
   user: UserProfile | null;
   token: string | null;
   role: string;
+  noGroup: boolean;
   login: () => void;
   logout: () => void;
 }
@@ -28,6 +29,7 @@ const AuthContext = createContext<AuthState>({
   user: null,
   token: null,
   role: "user",
+  noGroup: false,
   login: () => {},
   logout: () => {},
 });
@@ -43,6 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [role, setRole] = useState("user");
   const [isLoading, setIsLoading] = useState(true);
+  const [noGroup, setNoGroup] = useState(false);
 
   // Check for magic link token in localStorage
   const magicToken = localStorage.getItem("rag_auth_token");
@@ -79,7 +82,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setToken(apiToken);
           setRole(result.role || "user");
         } catch (err) {
-          console.error("Auth init failed:", err);
+          if (err instanceof ApiError && err.code === "no_group") {
+            // Authenticated against Azure AD but in neither group; ADR-0003.
+            setNoGroup(true);
+          } else {
+            console.error("Auth init failed:", err);
+          }
         }
       } else if (magicToken) {
         try {
@@ -114,7 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ isAuthenticated, isLoading, user, token, role, login, logout }}
+      value={{ isAuthenticated, isLoading, user, token, role, noGroup, login, logout }}
     >
       {children}
     </AuthContext.Provider>

@@ -5,6 +5,19 @@
 
 const UTILS_API = import.meta.env.VITE_UTILS_API_URL || "/api";
 
+/** Error carrying the HTTP status and the backend's error `code`, when present. */
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 interface FetchOptions extends RequestInit {
   token?: string;
 }
@@ -33,12 +46,16 @@ export async function apiClient(
   if (response.status === 401) {
     localStorage.removeItem("rag_auth_token");
     window.location.href = "/login";
-    throw new Error("Unauthorized");
+    throw new ApiError("Unauthorized", 401);
   }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: response.statusText }));
-    throw new Error(error.error || error.message || "Request failed");
+    throw new ApiError(
+      error.error || error.message || "Request failed",
+      response.status,
+      error.code,
+    );
   }
 
   // Handle binary responses (documents)

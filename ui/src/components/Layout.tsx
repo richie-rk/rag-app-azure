@@ -17,6 +17,7 @@ import {
   DocumentSearchRegular,
 } from "@fluentui/react-icons";
 import { useAuth } from "../auth/AuthProvider";
+import { NoAccessPage } from "../pages/NoAccessPage";
 
 const useStyles = makeStyles({
   root: {
@@ -128,7 +129,13 @@ export function Layout() {
   const styles = useStyles();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, logout, role } = useAuth();
+  const { user, logout, role, noGroup } = useAuth();
+
+  // SSO succeeded but the account is in neither group: show only the
+  // no-access page, never the app shell. See ADR-0003.
+  if (noGroup) {
+    return <NoAccessPage />;
+  }
 
   const navItems = [
     { path: "/chat", label: "Chat", icon: <ChatRegular className={styles.navIcon} /> },
