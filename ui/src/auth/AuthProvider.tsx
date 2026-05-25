@@ -81,6 +81,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           });
           setToken(apiToken);
           setRole(result.role || "user");
+          // Clear the lockout in case a previous attempt set it: group
+          // membership may have changed since.
+          setNoGroup(false);
         } catch (err) {
           if (err instanceof ApiError && err.code === "no_group") {
             // Authenticated against Azure AD but in neither group; ADR-0003.
