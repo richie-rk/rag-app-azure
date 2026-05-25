@@ -14,12 +14,22 @@ import {
   Button,
   Card,
   tokens,
+  MessageBar,
+  MessageBarBody,
+  Dialog,
+  DialogSurface,
+  DialogTitle,
+  DialogBody,
+  DialogContent,
+  DialogActions,
 } from "@fluentui/react-components";
 import {
   SearchRegular,
   PersonAddRegular,
 } from "@fluentui/react-icons";
 import { apiClient } from "../api/client";
+import { createMagicLink } from "../api/auth";
+import { useAuth } from "../auth/AuthProvider";
 import type { UserInfo } from "../api/types";
 
 const useStyles = makeStyles({
@@ -80,6 +90,20 @@ const useStyles = makeStyles({
     padding: "32px",
     color: tokens.colorNeutralForeground3,
   },
+  dialogContent: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+    minWidth: "360px",
+  },
+  linkRow: {
+    display: "flex",
+    gap: "8px",
+    alignItems: "center",
+  },
+  linkInput: {
+    flex: 1,
+  },
 });
 
 function getInitials(name: string): string {
@@ -93,15 +117,48 @@ function getInitials(name: string): string {
 
 export function UsersPage() {
   const styles = useStyles();
+  const { token } = useAuth();
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
 
+  // Invite (magic link) dialog state.
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteSending, setInviteSending] = useState(false);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+
   useEffect(() => {
-    apiClient("/users")
+    // Wait for the auth token before fetching: apiClient's localStorage fallback
+    // is only populated for magic-link users, so SSO users need the explicit pass.
+    if (!token) return;
+    apiClient("/users", { token })
       .then(setUsers)
       .finally(() => setLoading(false));
-  }, []);
+  }, [token]);
+
+  function openInvite() {
+    setInviteEmail("");
+    setInviteLink(null);
+    setInviteError(null);
+    setInviteOpen(true);
+  }
+
+  async function sendInvite() {
+    setInviteSending(true);
+    setInviteError(null);
+    try {
+      const result = await createMagicLink(inviteEmail, token || undefined);
+      setInviteLink(result.link);
+    } catch (err) {
+      setInviteError(
+        err instanceof Error ? err.message : "Failed to create the magic link.",
+      );
+    } finally {
+      setInviteSending(false);
+    }
+  }
 
   const filtered = search
     ? users.filter(
@@ -123,7 +180,11 @@ export function UsersPage() {
     <div className={styles.root}>
       <div className={styles.header}>
         <Text className={styles.title}>Users</Text>
-        <Button appearance="primary" icon={<PersonAddRegular />}>
+        <Button
+          appearance="primary"
+          icon={<PersonAddRegular />}
+          onClick={openInvite}
+        >
           Invite User
         </Button>
       </div>
@@ -190,6 +251,70 @@ export function UsersPage() {
           </TableBody>
         </Table>
       </Card>
+
+      <Dialog
+        open={inviteOpen}
+        onOpenChange={(_, data) => setInviteOpen(data.open)}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>Send magic link</DialogTitle>
+            <DialogContent>
+              <div className={styles.dialogContent}>
+                {inviteLink ? (
+                  <>
+                    <Text>Share this link with the recipient:</Text>
+                    <div className={styles.linkRow}>
+                      <Input
+                        className={styles.linkInput}
+                        value={inviteLink}
+                        readOnly
+                      />
+                      <Button
+                        onClick={() => {
+                          navigator.clipboard.writeText(inviteLink);
+                        }}
+                      >
+                        Copy
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Input
+                      placeholder="Recipient email"
+                      value={inviteEmail}
+                      onChange={(_, d) => setInviteEmail(d.value)}
+                      disabled={inviteSending}
+                    />
+                    {inviteError && (
+                      <MessageBar intent="error">
+                        <MessageBarBody>{inviteError}</MessageBarBody>
+                      </MessageBar>
+                    )}
+                  </>
+                )}
+              </div>
+            </DialogContent>
+            <DialogActions>
+              {inviteLink ? (
+                <Button onClick={() => setInviteOpen(false)}>Close</Button>
+              ) : (
+                <>
+                  <Button onClick={() => setInviteOpen(false)}>Cancel</Button>
+                  <Button
+                    appearance="primary"
+                    onClick={sendInvite}
+                    disabled={inviteSending || !inviteEmail}
+                  >
+                    {inviteSending ? "Sending..." : "Send"}
+                  </Button>
+                </>
+              )}
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 }
