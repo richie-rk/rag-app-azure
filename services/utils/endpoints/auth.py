@@ -13,6 +13,8 @@ from services.shared.auth import (
 from services.shared.config import get_settings
 from services.shared.models import MagicLink, User
 
+from .users import ensure_default_access
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,9 +47,12 @@ def verify_magic_link(session: Session, token: str) -> dict:
 
     Marks the token as used after validation.
     """
+    # Row-lock the link so concurrent /auth/verify calls for the same token
+    # serialize: only one transaction can read used=False, flip it, and commit.
     magic_link = (
         session.query(MagicLink)
         .filter(MagicLink.token == token, MagicLink.used == False)
+        .with_for_update()
         .first()
     )
 
@@ -72,6 +77,9 @@ def verify_magic_link(session: Session, token: str) -> dict:
         session.add(user)
         session.flush()
 
+    # Grant viewer access to the default project so the guest has somewhere
+    # to read. See ADR-0003.
+    ensure_default_access(session, user)
     session.commit()
 
     jwt_token = create_jwt(
