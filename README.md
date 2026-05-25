@@ -39,6 +39,12 @@ The purpose of this project is to build an enterprise RAG application on Azure. 
 
 The app is multi-tenant at the project level. Documents are grouped into projects, and each project is mapped to its own search index, system prompt, and access list, so different groups of users can work with separate document sets in one deployment.
 
+### Why Azure OpenAI and Azure AI Search
+
+If you're concerned about data privacy, you can use Azure OpenAI. It serves the same OpenAI models as the public API, but under your own Azure tenant and a contractual agreement with Microsoft: your prompts and documents stay in your chosen region and are not used to train the models. The result is data handling close to running your own model, without the cost and effort of actually hosting one.
+
+Azure AI Search is what makes project-level multi-tenancy practical. A single Search resource can hold many independent indexes, so every project gets its own index under one service, with its own documents and its own access boundary. There's no need to stand up a separate Search resource per project.
+
 ### Screenshots
 
 **Login.** Microsoft Entra ID SSO and magic-link email sign-in.
@@ -120,12 +126,6 @@ The app is multi-tenant at the project level. Documents are grouped into project
 - **Follow-up questions** suggested after each answer.
 - **Role-based access**, with the user management page limited to admins.
 - **Infrastructure as code** using Bicep templates and PowerShell scripts.
-
-### Why Azure OpenAI and Azure AI Search
-
-If you're concerned about data privacy, you can use Azure OpenAI. It serves the same OpenAI models as the public API, but under your own Azure tenant and a contractual agreement with Microsoft: your prompts and documents stay in your chosen region and are not used to train the models. The result is data handling close to running your own model, without the cost and effort of actually hosting one.
-
-Azure AI Search is what makes project-level multi-tenancy practical. A single Search resource can hold many independent indexes, so every project gets its own index under one service, with its own documents and its own access boundary. There's no need to stand up a separate Search resource per project.
 
 ## Architecture
 
