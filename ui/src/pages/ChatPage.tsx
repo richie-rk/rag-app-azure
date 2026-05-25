@@ -102,10 +102,11 @@ export function ChatPage() {
   const styles = useStyles();
   const { sessionId } = useParams();
   const navigate = useNavigate();
-  const { user, token } = useAuth();
+  const { user, token, role } = useAuth();
   const { projects, selectedProject, setSelectedProject } = useProjects();
   const { sessions, refresh: refreshSessions, removeSession, loadSessionHistory } = useSessions();
   const { sendMessage, isStreaming, streamingContent, dataPoints, followupQuestions } = useStreamChat();
+  const isGuest = role === "guest";
 
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState(sessionId || "");
@@ -272,7 +273,7 @@ export function ChatPage() {
             {messages.map((msg, i) => (
               <div key={i}>
                 <ChatMessage message={msg} />
-                {msg.role === "assistant" && (
+                {msg.role === "assistant" && !isGuest && (
                   <div className={styles.feedbackRow}>
                     <FeedbackButton
                       sessionId={currentSessionId}
@@ -310,7 +311,7 @@ export function ChatPage() {
           </div>
         )}
 
-        {followupQuestions.length > 0 && !isStreaming && (
+        {followupQuestions.length > 0 && !isStreaming && !isGuest && (
           <div className={styles.followup}>
             {followupQuestions.map((q, i) => (
               <Button
@@ -329,11 +330,13 @@ export function ChatPage() {
 
         <ChatInput
           onSend={handleSend}
-          disabled={isStreaming}
+          disabled={isStreaming || isGuest}
           placeholder={
-            selectedProject
-              ? `Ask about ${selectedProject.display_name}...`
-              : "Select a project first"
+            isGuest
+              ? "View-only access: chat is disabled for guest accounts"
+              : selectedProject
+                ? `Ask about ${selectedProject.display_name}...`
+                : "Select a project first"
           }
         />
       </div>
