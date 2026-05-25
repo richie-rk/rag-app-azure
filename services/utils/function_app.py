@@ -60,6 +60,16 @@ def _require_non_guest(req: func.HttpRequest) -> dict | func.HttpResponse:
     return claims
 
 
+def _require_admin(req: func.HttpRequest) -> dict | func.HttpResponse:
+    """Like _require_auth, but also requires the 'admin' role."""
+    claims = _require_auth(req)
+    if isinstance(claims, func.HttpResponse):
+        return claims
+    if claims.get("role") != "admin":
+        return _json_response({"error": "Admin role required"}, 403)
+    return claims
+
+
 def _get_body(req: func.HttpRequest) -> dict:
     return req.get_json()
 
@@ -365,9 +375,16 @@ def prompt_library_fn(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name("create_magic_link")
 @app.route(route="auth/magic-link", methods=["POST"])
 def create_magic_link_fn(req: func.HttpRequest) -> func.HttpResponse:
+    claims = _require_admin(req)
+    if isinstance(claims, func.HttpResponse):
+        return claims
+
     from .endpoints.auth import create_magic_link
 
-    body = _get_body(req)
+    try:
+        body = _get_body(req) or {}
+    except Exception:
+        body = {}
     email = body.get("email", "")
     if not email:
         return _json_response({"error": "email required"}, 400)
