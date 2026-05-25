@@ -16,10 +16,10 @@ A Retrieval-Augmented Generation (RAG) app built on Azure. Upload documents and 
 ## Table of Contents
 
 - [About the Project](#about-the-project)
+  - [Why Azure OpenAI and Azure AI Search](#why-azure-openai-and-azure-ai-search)
   - [Screenshots](#screenshots)
   - [Tech Stack](#tech-stack)
   - [Features](#features)
-  - [Why Azure OpenAI and Azure AI Search](#why-azure-openai-and-azure-ai-search)
 - [Architecture](#architecture)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)

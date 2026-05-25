@@ -200,7 +200,8 @@ def provision_user_fn(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name("list_users")
 @app.route(route="users", methods=["GET"])
 def list_users_fn(req: func.HttpRequest) -> func.HttpResponse:
-    claims = _require_auth(req)
+    # Admin-only: enumerating all users' emails and display names is privileged.
+    claims = _require_admin(req)
     if isinstance(claims, func.HttpResponse):
         return claims
 
@@ -385,7 +386,9 @@ def create_magic_link_fn(req: func.HttpRequest) -> func.HttpResponse:
         body = _get_body(req) or {}
     except Exception:
         body = {}
-    email = body.get("email", "")
+    # Trim and lowercase so " User@Example.com " and "user@example.com" end up
+    # at the same stored identity.
+    email = body.get("email", "").strip().lower()
     if not email:
         return _json_response({"error": "email required"}, 400)
 

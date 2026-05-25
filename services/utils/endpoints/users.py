@@ -7,6 +7,7 @@ Auto-provisions users on first login with default project access.
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from services.shared.models import Project, User, UserProjectAccess
@@ -15,14 +16,27 @@ logger = logging.getLogger(__name__)
 
 
 def _ensure_main_project(session: Session) -> None:
-    """Create the canonical 'main' default project if none exists.
-
-    Every authenticated user gets viewer access to a default project, and
-    'main' is the bootstrap default when the projects table has none. See
-    ADR-0003.
+    """Ensure an active default project exists, creating or reactivating
+    'main'. Every authenticated user gets viewer access to a default project,
+    so an inactive-only default would leave new users with zero access.
+    See ADR-0003.
     """
-    existing = session.query(Project).filter(Project.is_default == True).first()
-    if existing:
+    active_default = (
+        session.query(Project)
+        .filter(Project.is_default == True, Project.is_active == True)
+        .first()
+    )
+    if active_default:
+        return
+
+    # No active default. Reuse an existing 'main' if it is in the table
+    # (Project.name is unique, so we cannot create a second).
+    main = session.query(Project).filter(Project.name == "main").first()
+    if main:
+        main.is_active = True
+        main.is_default = True
+        session.flush()
+        logger.info("Reactivated default project 'main'")
         return
 
     main = Project(
@@ -62,12 +76,21 @@ def ensure_default_access(session: Session, user: User) -> None:
             )
             .first()
         )
-        if not already:
-            session.add(
-                UserProjectAccess(
-                    user_id=user.id, project_id=project.id, role="viewer"
+        if already:
+            continue
+        # Each insert in a savepoint so a competing transaction that wins the
+        # UniqueConstraint(user_id, project_id) race rolls back just this row,
+        # not the surrounding work. The competing insert means the grant now
+        # exists, which is exactly what we wanted, so swallow the error.
+        try:
+            with session.begin_nested():
+                session.add(
+                    UserProjectAccess(
+                        user_id=user.id, project_id=project.id, role="viewer"
+                    )
                 )
-            )
+        except IntegrityError:
+            pass
 
 
 def provision_user(

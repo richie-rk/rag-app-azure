@@ -47,9 +47,12 @@ def verify_magic_link(session: Session, token: str) -> dict:
 
     Marks the token as used after validation.
     """
+    # Row-lock the link so concurrent /auth/verify calls for the same token
+    # serialize: only one transaction can read used=False, flip it, and commit.
     magic_link = (
         session.query(MagicLink)
         .filter(MagicLink.token == token, MagicLink.used == False)
+        .with_for_update()
         .first()
     )
 

@@ -117,7 +117,7 @@ function getInitials(name: string): string {
 
 export function UsersPage() {
   const styles = useStyles();
-  const { token } = useAuth();
+  const { token, isLoading: authLoading } = useAuth();
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -130,13 +130,14 @@ export function UsersPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Wait for the auth token before fetching: apiClient's localStorage fallback
-    // is only populated for magic-link users, so SSO users need the explicit pass.
-    if (!token) return;
-    apiClient("/users", { token })
+    // Keep the spinner up while auth is still resolving. Once it has, fetch
+    // with the token if we have one; otherwise let apiClient hit the 401 path
+    // and redirect to /login, instead of leaving the page in perpetual loading.
+    if (authLoading) return;
+    apiClient("/users", { token: token || undefined })
       .then(setUsers)
       .finally(() => setLoading(false));
-  }, [token]);
+  }, [token, authLoading]);
 
   function openInvite() {
     setInviteEmail("");
