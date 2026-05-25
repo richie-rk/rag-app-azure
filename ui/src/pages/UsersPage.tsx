@@ -52,6 +52,9 @@ const useStyles = makeStyles({
   searchRow: {
     marginBottom: "16px",
   },
+  errorBar: {
+    marginBottom: "16px",
+  },
   searchInput: {
     maxWidth: "320px",
   },
@@ -121,6 +124,7 @@ export function UsersPage() {
   const [users, setUsers] = useState<UserInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Invite (magic link) dialog state.
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -134,8 +138,17 @@ export function UsersPage() {
     // with the token if we have one; otherwise let apiClient hit the 401 path
     // and redirect to /login, instead of leaving the page in perpetual loading.
     if (authLoading) return;
+    setLoadError(null);
     apiClient("/users", { token: token || undefined })
       .then(setUsers)
+      .catch((err) => {
+        // Surface the failure: without this, a 403 (non-admin) or 5xx becomes
+        // an unhandled rejection and the table reads as "No users found"
+        // rather than "you cannot load this page".
+        setLoadError(
+          err instanceof Error ? err.message : "Failed to load users.",
+        );
+      })
       .finally(() => setLoading(false));
   }, [token, authLoading]);
 
@@ -189,6 +202,14 @@ export function UsersPage() {
           Invite User
         </Button>
       </div>
+
+      {loadError && (
+        <div className={styles.errorBar}>
+          <MessageBar intent="error">
+            <MessageBarBody>{loadError}</MessageBarBody>
+          </MessageBar>
+        </div>
+      )}
 
       <div className={styles.searchRow}>
         <Input
