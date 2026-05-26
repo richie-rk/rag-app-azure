@@ -113,6 +113,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch {
           localStorage.removeItem("rag_auth_token");
         }
+      } else {
+        // No MSAL session and no magic-link token: clear any prior auth so
+        // apiClient does not keep sending a stale bearer after sign-out or
+        // session loss.
+        tokenRef.current = null;
+        setToken(null);
+        setUser(null);
+        setRole("user");
+        setNoGroup(false);
       }
       setIsLoading(false);
     }
@@ -127,7 +136,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [instance]);
 
   const logout = useCallback(() => {
+    // Clear auth state synchronously, including the ref, so apiClient stops
+    // sending the bearer in the window before the redirect resolves.
     localStorage.removeItem("rag_auth_token");
+    tokenRef.current = null;
+    setToken(null);
+    setUser(null);
+    setRole("user");
+    setNoGroup(false);
     if (isMsalAuthenticated) {
       instance.logoutRedirect();
     } else {
