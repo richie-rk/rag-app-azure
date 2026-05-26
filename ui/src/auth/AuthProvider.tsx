@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -10,7 +11,7 @@ import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { apiRequest, loginRequest } from "./msal-config";
 import { fetchUserProfile, type UserProfile } from "./graph-service";
-import { ApiError, apiClient } from "../api/client";
+import { ApiError, apiClient, setTokenGetter } from "../api/client";
 
 interface AuthState {
   isAuthenticated: boolean;
@@ -46,6 +47,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState("user");
   const [isLoading, setIsLoading] = useState(true);
   const [noGroup, setNoGroup] = useState(false);
+
+  // Mirror the token into a ref so apiClient's registered getter reads the
+  // current value at call time, not whatever was captured at registration.
+  const tokenRef = useRef<string | null>(null);
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
+  useEffect(() => {
+    setTokenGetter(() => tokenRef.current);
+    return () => setTokenGetter(null);
+  }, []);
 
   // Check for magic link token in localStorage
   const magicToken = localStorage.getItem("rag_auth_token");
