@@ -22,14 +22,33 @@ interface FetchOptions extends RequestInit {
   token?: string;
 }
 
+/**
+ * Holder for the SSO token getter. AuthProvider registers a callback on
+ * mount so apiClient can resolve the SSO bearer from React state without
+ * every caller passing it explicitly. Magic-link users keep working through
+ * the localStorage fallback below.
+ */
+let tokenGetter: (() => string | null) | null = null;
+
+export function setTokenGetter(
+  getter: (() => string | null) | null,
+): void {
+  tokenGetter = getter;
+}
+
 export async function apiClient(
   path: string,
   options: FetchOptions = {},
 ): Promise<any> {
   const { token, headers: customHeaders, ...rest } = options;
 
-  // Use stored token if not explicitly provided
-  const authToken = token || localStorage.getItem("rag_auth_token") || "";
+  // Token resolution order: explicit caller-provided, then the SSO getter
+  // (React state), then magic-link's localStorage entry, then empty.
+  const authToken =
+    token ||
+    tokenGetter?.() ||
+    localStorage.getItem("rag_auth_token") ||
+    "";
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
