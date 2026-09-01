@@ -817,21 +817,32 @@ if ($sqlServerReady) {
         }
     }
 
+    # Every per-app lookup is verified: refreshing on a PARTIAL IP set would
+    # purge a healthy app's rules and recreate only the others', silently
+    # cutting that app's SQL access.
     $outboundIps = @()
-    $outboundIps += ((az webapp show --name $CHAT_APP --resource-group $RESOURCE_GROUP `
-        --query possibleOutboundIpAddresses --output tsv 2>$null) -split ",")
-    foreach ($funcName in @($UTILS_FUNC, $INGEST_FUNC)) {
-        $outboundIps += ((az functionapp show --name $funcName --resource-group $RESOURCE_GROUP `
-            --query possibleOutboundIpAddresses --output tsv 2>$null) -split ",")
+    $ipLookupFailed = $false
+    foreach ($siteDef in @(
+        @{ Name = $CHAT_APP;    Kind = "webapp" },
+        @{ Name = $UTILS_FUNC;  Kind = "functionapp" },
+        @{ Name = $INGEST_FUNC; Kind = "functionapp" }
+    )) {
+        $ipCsv = az $siteDef.Kind show --name $siteDef.Name --resource-group $RESOURCE_GROUP `
+            --query possibleOutboundIpAddresses --output tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $ipCsv) {
+            Write-Status "$($siteDef.Name): outbound IPs unavailable" "Red"
+            $ipLookupFailed = $true
+            continue
+        }
+        $outboundIps += ($ipCsv -split ",")
     }
     $uniqueIps = $outboundIps | Where-Object { $_ } | ForEach-Object { $_.Trim() } | Select-Object -Unique
 
-    if (-not $uniqueIps) {
-        # A transient az failure (or apps not yet provisioned) must not purge
-        # working rules and recreate nothing, which would silently cut the
-        # apps' SQL access until the next successful run.
-        Write-Status "Could not resolve app outbound IPs - keeping existing firewall rules" "Yellow"
-        $provisioningErrors += "SQL firewall: app outbound IPs unresolved; rules not refreshed"
+    if ($ipLookupFailed -or -not $uniqueIps) {
+        # Incomplete discovery (any app's lookup failed or returned nothing)
+        # keeps the existing rules in place untouched.
+        Write-Status "Outbound IP discovery incomplete - keeping existing firewall rules" "Yellow"
+        $provisioningErrors += "SQL firewall: outbound IP discovery incomplete; rules not refreshed"
     } else {
         # Drop every existing app-outbound-* rule before recreating: when the
         # IP set shrinks between runs, higher-index rules would otherwise
