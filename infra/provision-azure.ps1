@@ -781,18 +781,41 @@ if ($sqlServerReady) {
     }
     $uniqueIps = $outboundIps | Where-Object { $_ } | ForEach-Object { $_.Trim() } | Select-Object -Unique
 
-    $ruleIndex = 0
-    foreach ($ip in $uniqueIps) {
-        az sql server firewall-rule create `
+    if (-not $uniqueIps) {
+        # A transient az failure (or apps not yet provisioned) must not purge
+        # working rules and recreate nothing, which would silently cut the
+        # apps' SQL access until the next successful run.
+        Write-Status "Could not resolve app outbound IPs - keeping existing firewall rules" "Yellow"
+    } else {
+        # Drop every existing app-outbound-* rule before recreating: when the
+        # IP set shrinks between runs, higher-index rules would otherwise
+        # linger and keep granting access to IPs the apps no longer use.
+        $staleRules = az sql server firewall-rule list `
             --server $SQL_SERVER `
             --resource-group $RESOURCE_GROUP `
-            --name "app-outbound-$ruleIndex" `
-            --start-ip-address $ip `
-            --end-ip-address $ip `
-            --output none 2>$null
-        $ruleIndex++
+            --query "[?starts_with(name, 'app-outbound-')].name" `
+            --output tsv 2>$null
+        foreach ($staleRule in (($staleRules -split "`n") | Where-Object { $_ })) {
+            az sql server firewall-rule delete `
+                --server $SQL_SERVER `
+                --resource-group $RESOURCE_GROUP `
+                --name $staleRule.Trim() `
+                --output none 2>$null
+        }
+
+        $ruleIndex = 0
+        foreach ($ip in $uniqueIps) {
+            az sql server firewall-rule create `
+                --server $SQL_SERVER `
+                --resource-group $RESOURCE_GROUP `
+                --name "app-outbound-$ruleIndex" `
+                --start-ip-address $ip `
+                --end-ip-address $ip `
+                --output none 2>$null
+            $ruleIndex++
+        }
+        Write-Status "Added $ruleIndex outbound-IP firewall rules (wildcard rule removed)" "Green"
     }
-    Write-Status "Added $ruleIndex outbound-IP firewall rules (wildcard rule removed)" "Green"
 } else {
     Write-Status "Skipping - SQL Server not available" "Yellow"
 }

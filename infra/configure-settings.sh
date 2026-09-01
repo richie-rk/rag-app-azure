@@ -48,12 +48,15 @@ kv_ref() { echo "@Microsoft.KeyVault(SecretUri=https://${KV}.vault.azure.net/sec
 
 if az keyvault show --name "$KV" --resource-group "$RG" --output none 2>/dev/null; then
   echo "=== Key Vault secrets ==="
+  # Abort on any failed write: continuing would apply Key Vault references
+  # for secrets that were never stored, leaving every service broken at
+  # startup while the script still reports success.
   az keyvault secret set --vault-name "$KV" --name "database-url" --value "$DB_URL" --output none \
     && az keyvault secret set --vault-name "$KV" --name "jwt-secret" --value "$JWT" --output none \
     && az keyvault secret set --vault-name "$KV" --name "azure-openai-api-key" --value "$OAI_KEY" --output none \
     && az keyvault secret set --vault-name "$KV" --name "azure-search-admin-key" --value "$SEARCH_KEY" --output none \
     && az keyvault secret set --vault-name "$KV" --name "azure-storage-connection-string" --value "$STORAGE_CONN" --output none \
-    && echo "  OK" || echo "  FAILED"
+    && echo "  OK" || { echo "  FAILED - aborting before any Key Vault references are applied"; exit 1; }
 
   DB_URL_SETTING=$(kv_ref database-url)
   JWT_SETTING=$(kv_ref jwt-secret)
@@ -121,7 +124,8 @@ az functionapp config appsettings set --name "$INGEST" --resource-group "$RG" --
   "AZURE_SEARCH_ENDPOINT=$SEARCH_EP" \
   "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY_SETTING" \
   "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN_SETTING" \
-  "DEFAULT_BLOB_CONTAINER=$BLOB_CONTAINER" && echo "  OK" || echo "  FAILED"
+  "DEFAULT_BLOB_CONTAINER=$BLOB_CONTAINER" \
+  "JWT_SECRET=$JWT_SETTING" && echo "  OK" || echo "  FAILED"
 
 echo ""
 echo "Done. Verify at: https://portal.azure.com"
