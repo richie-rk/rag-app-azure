@@ -26,15 +26,20 @@ async def stream_completion(
     client = get_openai_client()
     model = deployment or settings.default_llm_deployment
 
+    yielded_any = False
     try:
-        yield_from = _do_stream(client, model, messages, temperature, max_tokens)
-        async for token in yield_from:
+        async for token in _do_stream(client, model, messages, temperature, max_tokens):
+            yielded_any = True
             yield token
     except BadRequestError as exc:
+        if yielded_any:
+            # Tokens already reached the client; retrying from scratch would
+            # replay the answer and duplicate text. Let the stream wrapper
+            # surface this as an error chunk instead.
+            raise
         logger.warning("BadRequestError (likely context overflow): %s - truncating and retrying", exc)
         truncated = _truncate_messages(messages)
-        yield_from = _do_stream(client, model, truncated, temperature, max_tokens)
-        async for token in yield_from:
+        async for token in _do_stream(client, model, truncated, temperature, max_tokens):
             yield token
 
 

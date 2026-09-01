@@ -50,8 +50,11 @@ export async function apiClient(
     localStorage.getItem("rag_auth_token") ||
     "";
 
+  // A FormData body sets its own multipart Content-Type (with boundary); only
+  // force JSON otherwise.
+  const isFormData = rest.body instanceof FormData;
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
     ...(customHeaders as Record<string, string>),
   };
 

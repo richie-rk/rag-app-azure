@@ -28,56 +28,95 @@ export function useStreamChat() {
       setDataPoints([]);
       setFollowupQuestions([]);
 
+      // Locals, so the returned message reflects THIS turn. The state
+      // variables above exist for rendering; reading them here would give
+      // the values captured when the callback was created (previous turn).
       let fullContent = "";
+      let turnDataPoints: string[] = [];
+      let turnFollowups: string[] = [];
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      const handleLine = (line: string) => {
+        let chunk: StreamChunk & { error?: string };
+        try {
+          chunk = JSON.parse(line);
+        } catch {
+          return; // genuinely malformed line
+        }
+        if (chunk.error) {
+          throw new Error(chunk.error);
+        }
+        const choice = chunk.choices?.[0];
+        if (!choice) return;
+
+        if (choice.delta?.content) {
+          fullContent += choice.delta.content;
+          setStreamingContent(fullContent);
+        }
+        if (choice.context?.data_points) {
+          turnDataPoints = choice.context.data_points;
+          setDataPoints(turnDataPoints);
+        }
+        if (choice.context?.followup_questions) {
+          turnFollowups = choice.context.followup_questions;
+          setFollowupQuestions(turnFollowups);
+        }
+      };
 
       try {
-        const stream = await streamChat(request, token);
+        const stream = await streamChat(request, token, controller.signal);
         const reader = stream.getReader();
+
+        // Carry-over buffer: network chunk boundaries are not line
+        // boundaries, so a JSON object can arrive split across two reads.
+        // Keep the trailing partial line and prepend it to the next read.
+        let buffer = "";
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          // Parse NDJSON: split on newlines, parse each line
-          const lines = value.split("\n").filter((l) => l.trim());
+          buffer += value;
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? ""; // last element is an incomplete tail
           for (const line of lines) {
-            try {
-              const chunk: StreamChunk = JSON.parse(line);
-              const choice = chunk.choices?.[0];
-              if (!choice) continue;
-
-              // Content delta
-              if (choice.delta?.content) {
-                fullContent += choice.delta.content;
-                setStreamingContent(fullContent);
-              }
-
-              // Metadata chunk (first chunk with data_points)
-              if (choice.context?.data_points) {
-                setDataPoints(choice.context.data_points);
-              }
-
-              // Follow-up questions (final chunk)
-              if (choice.context?.followup_questions) {
-                setFollowupQuestions(choice.context.followup_questions);
-              }
-            } catch {
-              // Skip malformed lines
-            }
+            if (line.trim()) handleLine(line);
           }
         }
+        // Flush a final line that arrived without a trailing newline.
+        if (buffer.trim()) handleLine(buffer);
 
         setIsStreaming(false);
         return {
           role: "assistant",
           content: fullContent,
-          dataPoints: dataPoints,
-          followupQuestions: [],
+          dataPoints: turnDataPoints,
+          followupQuestions: turnFollowups,
           timestamp: new Date().toISOString(),
         };
       } catch (err) {
         setIsStreaming(false);
+        // Stop button: keep whatever streamed instead of surfacing an error.
+        if (controller.signal.aborted) {
+          if (!fullContent) return null;
+          return {
+            role: "assistant",
+            content: fullContent,
+            dataPoints: turnDataPoints,
+            followupQuestions: [],
+            timestamp: new Date().toISOString(),
+          };
+        }
         throw err;
+      } finally {
+        // Only clear our own controller: if a newer sendMessage overlapped,
+        // abortRef already points at its controller and nulling it here
+        // would break that turn's Stop button.
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
       }
     },
     [token],

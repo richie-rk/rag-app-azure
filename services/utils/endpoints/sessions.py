@@ -8,6 +8,7 @@ from azure.data.tables import UpdateMode
 
 from services.shared.azure_clients import get_table_service_client
 from services.shared.config import get_settings
+from services.shared.odata import odata_escape
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +19,20 @@ def _get_table_client():
     return service.get_table_client(settings.azure_table_name)
 
 
-def save_session(data: dict) -> dict:
-    """Save a chat turn to Table Storage, merging into the existing row if present."""
+def save_session(data: dict, caller_email: str) -> dict:
+    """Save a chat turn to Table Storage, merging into the existing row if present.
+
+    `caller_email` is the authenticated identity; the stored username always
+    comes from it, never from the request body, and the merge path refuses to
+    touch a row owned by someone else.
+    """
     table_client = _get_table_client()
 
     entity = {
         "PartitionKey": data["session_id"],
         "RowKey": data["timestamp"],
         "session_name": data.get("session_name", "")[:100],
-        "username": data.get("username", ""),
+        "username": caller_email,
         "conversation": json.dumps({
             "user_query": data.get("user_query", ""),
             "bot": data.get("bot_response", ""),
@@ -44,6 +50,8 @@ def save_session(data: dict) -> dict:
                 partition_key=entity["PartitionKey"],
                 row_key=entity["RowKey"],
             )
+            if existing.get("username") != caller_email:
+                return {"error": "Cannot modify another user's session"}
             existing.update(entity)
             table_client.update_entity(entity=existing, mode=UpdateMode.MERGE)
         except ResourceNotFoundError:
@@ -61,9 +69,9 @@ def get_sessions(username: str, session_id: str | None = None) -> list[dict]:
     table_client = _get_table_client()
 
     if session_id:
-        filter_expr = f"PartitionKey eq '{session_id}'"
+        filter_expr = f"PartitionKey eq '{odata_escape(session_id)}'"
     else:
-        filter_expr = f"username eq '{username}'"
+        filter_expr = f"username eq '{odata_escape(username)}'"
 
     entities = table_client.query_entities(filter_expr)
 
@@ -88,13 +96,20 @@ def get_sessions(username: str, session_id: str | None = None) -> list[dict]:
     return sessions
 
 
-def delete_session(session_id: str) -> dict:
-    """Delete all entities for a given session."""
+def delete_session(session_id: str, caller_email: str) -> dict:
+    """Delete the caller's entities for a given session.
+
+    Rows are keyed only by session_id (partition), so ownership is enforced
+    per row: turns saved by other users in the same partition are left alone,
+    and a caller cannot wipe someone else's session by guessing its id.
+    """
     table_client = _get_table_client()
 
-    entities = table_client.query_entities(f"PartitionKey eq '{session_id}'")
+    entities = table_client.query_entities(f"PartitionKey eq '{odata_escape(session_id)}'")
     count = 0
     for entity in entities:
+        if entity.get("username") != caller_email:
+            continue
         table_client.delete_entity(
             partition_key=entity["PartitionKey"],
             row_key=entity["RowKey"],

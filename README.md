@@ -47,7 +47,7 @@ Azure AI Search is what makes project-level multi-tenancy practical. A single Se
 
 ### Screenshots
 
-**Login.** Microsoft Entra ID SSO and magic-link email sign-in.
+**Login.** Microsoft Entra ID SSO; guests sign in via admin-issued magic links.
 
 ![Login](docs/images/ui-login-dark.png)
 
@@ -117,7 +117,7 @@ Azure AI Search is what makes project-level multi-tenancy practical. A single Se
 
 - **Hybrid retrieval** that combines vector search, BM25 keyword matching, and a semantic reranker in one Azure AI Search query.
 - **Streaming answers** sent as NDJSON and rendered token by token in the UI.
-- **Two sign-in options**, Microsoft Entra ID SSO for organization accounts and magic-link email for guests.
+- **Two sign-in options**, Microsoft Entra ID SSO for organization accounts and magic links for guests, issued only by administrators from the Users page.
 - **Project isolation**, where each project has its own search index, documents, system prompt, and LLM deployment.
 - **Document ingestion** through an Azure Durable Functions pipeline for PDF, DOCX, PPTX, and text-based files.
 - **Chat history** saved to Azure Table Storage, with save, load, and delete.

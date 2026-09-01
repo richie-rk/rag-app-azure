@@ -1,8 +1,10 @@
 """Prompt templates and the LLM message builder.
 
-A custom system-prompt template must keep the {sources} placeholder, or
-str.format silently drops the retrieved context.
+A custom system-prompt template must keep the {sources} placeholder, or the
+renderer leaves the retrieved context out of the prompt.
 """
+
+import re
 
 DEFAULT_SYSTEM_PROMPT = """You are an intelligent assistant helping users find information.
 Use the following sources to answer the user's question. Each source is identified by a filename.
@@ -48,6 +50,19 @@ def build_chat_history_text(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# overrides.prompt_template is caller-controlled, so str.format here would let a
+# payload like {sources.__class__...} walk to Python internals and would raise on
+# stray braces. Substituting only the two known tokens by regex escapes both traps,
+# and re.sub never re-scans replacement text, so a source that itself contains
+# "{chat_history}" cannot pull the history in.
+_PLACEHOLDER_RE = re.compile(r"\{(sources|chat_history)\}")
+
+
+def _render_template(template: str, sources: str, chat_history: str) -> str:
+    values = {"sources": sources, "chat_history": chat_history}
+    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
+
+
 def build_messages(
     user_query: str,
     data_points: list[dict],
@@ -64,10 +79,7 @@ def build_messages(
     sources = build_context_string(data_points)
     chat_history = build_chat_history_text(history)
 
-    system_content = template.format(
-        sources=sources,
-        chat_history=chat_history if "{chat_history}" in template else "",
-    )
+    system_content = _render_template(template, sources, chat_history)
 
     if suggest_followup:
         system_content += "\n\n" + FOLLOWUP_PROMPT

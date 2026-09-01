@@ -59,7 +59,13 @@ def verify_magic_link(session: Session, token: str) -> dict:
     if not magic_link:
         return {"error": "Invalid or already used token", "status": 401}
 
-    if magic_link.expires_at < datetime.now(timezone.utc):
+    # expires_at is written as aware UTC but the column is a naive DateTime,
+    # so the driver strips tzinfo on the round-trip. Re-attach UTC before
+    # comparing, otherwise naive-vs-aware comparison raises TypeError (500).
+    expires_at = magic_link.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
         return {"error": "Token has expired", "status": 401}
 
     # Mark as used

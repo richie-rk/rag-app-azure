@@ -23,12 +23,20 @@ from azure.search.documents.indexes.models import (
 
 from services.shared.azure_clients import get_search_client, get_search_index_client
 from services.shared.config import get_settings
+from services.shared.odata import odata_escape
 
 from .chunking.base import Chunk
 
 logger = logging.getLogger(__name__)
 
-_UPLOAD_BATCH_SIZE = 1000
+# Azure AI Search service limits (as of 2024-07-01 API):
+#   - $top on a query is capped at 1000
+#   - an indexing request may contain at most 1000 docs AND at most ~16 MB
+# Vector docs are large (1536 floats ≈ 20-30 KB each), so batches are capped
+# by estimated payload size as well as count.
+_DELETE_PAGE_SIZE = 1000
+_UPLOAD_MAX_DOCS = 500
+_UPLOAD_MAX_BYTES = 12 * 1024 * 1024  # headroom under the 16 MB limit
 
 
 def create_search_index(index_name: str) -> None:
@@ -131,29 +139,37 @@ def compute_file_hash(content: bytes) -> str:
 def remove_existing_chunks(index_name: str, source_file: str) -> int:
     """Delete all existing chunks for a file from the search index.
 
+    Pages through matches in blocks of _DELETE_PAGE_SIZE ($top is capped at
+    1000 by the service; the previous top=10000 both errored and would have
+    silently stranded chunks of very large documents). The loop is bounded
+    as a guard against eventual-consistency re-reads.
+
     Returns the number of chunks deleted.
     """
     search_client = get_search_client(index_name)
+    total_deleted = 0
 
-    # Query for all chunk IDs belonging to this file
-    results = search_client.search(
-        search_text="*",
-        filter=f"sourcefile eq '{source_file}'",
-        select=["id"],
-        top=10000,
-    )
+    for _ in range(100):  # safety bound: 100k chunks per file is beyond any expected doc
+        results = search_client.search(
+            search_text="*",
+            filter=f"sourcefile eq '{odata_escape(source_file)}'",
+            select=["id"],
+            top=_DELETE_PAGE_SIZE,
+        )
+        chunk_ids = [{"id": r["id"]} for r in results]
+        if not chunk_ids:
+            break
+        search_client.delete_documents(documents=chunk_ids)
+        total_deleted += len(chunk_ids)
+        if len(chunk_ids) < _DELETE_PAGE_SIZE:
+            break
 
-    chunk_ids = [{"id": r["id"]} for r in results]
-    if not chunk_ids:
-        return 0
-
-    # Batch delete
-    for batch_start in range(0, len(chunk_ids), _UPLOAD_BATCH_SIZE):
-        batch = chunk_ids[batch_start : batch_start + _UPLOAD_BATCH_SIZE]
-        search_client.delete_documents(documents=batch)
-
-    logger.info("Deleted %d existing chunks for '%s' in index '%s'", len(chunk_ids), source_file, index_name)
-    return len(chunk_ids)
+    if total_deleted:
+        logger.info(
+            "Deleted %d existing chunks for '%s' in index '%s'",
+            total_deleted, source_file, index_name,
+        )
+    return total_deleted
 
 
 def upload_documents(
@@ -183,11 +199,50 @@ def upload_documents(
             }
         )
 
+    # Batch by estimated payload size as well as count: vector docs at 1536
+    # dims are ~20-30 KB each, so 1000-doc batches exceeded the service's
+    # 16 MB indexing payload limit.
+    per_vector_bytes = len(documents[0]["content_vector"]) * 15 if documents else 0
+
     uploaded = 0
-    for batch_start in range(0, len(documents), _UPLOAD_BATCH_SIZE):
-        batch = documents[batch_start : batch_start + _UPLOAD_BATCH_SIZE]
+    failed: list[tuple[str, str]] = []
+    batch: list[dict] = []
+    batch_bytes = 0
+
+    def _flush() -> None:
+        nonlocal uploaded, batch, batch_bytes
+        if not batch:
+            return
         result = search_client.upload_documents(documents=batch)
-        uploaded += sum(1 for r in result if r.succeeded)
+        for r in result:
+            if r.succeeded:
+                uploaded += 1
+            else:
+                failed.append((r.key, r.error_message or "unknown error"))
+        batch = []
+        batch_bytes = 0
+
+    for doc in documents:
+        doc_bytes = len(doc["content"]) + per_vector_bytes + 500
+        if batch and (
+            len(batch) >= _UPLOAD_MAX_DOCS or batch_bytes + doc_bytes > _UPLOAD_MAX_BYTES
+        ):
+            _flush()
+        batch.append(doc)
+        batch_bytes += doc_bytes
+    _flush()
+
+    if failed:
+        # Previously failures were silently counted away, leaving a partial
+        # index behind a lower chunk count. Log each and fail the file so the
+        # audit row records the error and a retry re-processes it (chunk IDs
+        # are deterministic, so retries overwrite rather than duplicate).
+        for key, err in failed[:20]:
+            logger.error("Failed to index chunk '%s': %s", key, err)
+        raise RuntimeError(
+            f"{len(failed)} of {len(documents)} chunks failed to index "
+            f"(first: {failed[0][0]}: {failed[0][1]})"
+        )
 
     logger.info("Uploaded %d chunks to index '%s'", uploaded, index_name)
     return uploaded

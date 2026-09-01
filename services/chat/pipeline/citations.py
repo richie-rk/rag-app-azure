@@ -33,9 +33,11 @@ def extract_followup_questions(content: str) -> tuple[str, list[str]]:
     """
     questions = re.findall(r"<<([^>]+)>>", content)
 
-    # Remove everything from the first << onward
+    # Remove everything from the first << onward. find() returns -1 when
+    # absent; a marker at position 0 (reply starts with follow-ups) must
+    # still strip, so compare against -1, not 0.
     first_marker = content.find("<<")
-    if first_marker > 0:
+    if first_marker != -1:
         clean = content[:first_marker].rstrip()
     else:
         clean = content
