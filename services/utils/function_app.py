@@ -130,17 +130,33 @@ def get_projects_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.projects import get_projects
 
-    user_id = req.params.get("user_id")
     factory = get_session_factory()
     with factory() as session:
-        result = get_projects(session, int(user_id) if user_id else None)
+        if claims.get("role") == "admin":
+            # Admins may list all projects, or scope to a specific user
+            # (used when managing another user's project access).
+            user_id_raw = req.params.get("user_id")
+            try:
+                user_id = int(user_id_raw) if user_id_raw else None
+            except ValueError:
+                return _json_response({"error": "user_id must be an integer"}, 400)
+            result = get_projects(session, user_id)
+        else:
+            # Non-admins only ever see their own projects. Identity is the
+            # token subject; the user_id query param is ignored so one user
+            # cannot enumerate another user's projects (or all of them).
+            user = session.query(User).filter(User.email == claims["sub"]).first()
+            result = get_projects(session, user.id) if user else []
     return _json_response(result)
 
 
 @app.function_name("create_project")
 @app.route(route="projects", methods=["POST"])
 def create_project_fn(req: func.HttpRequest) -> func.HttpResponse:
-    claims = _require_auth(req)
+    # Admin-only: projects define index names and system prompts, which
+    # control what every member of the project can retrieve and how the
+    # model is instructed. Not a self-service operation.
+    claims = _require_admin(req)
     if isinstance(claims, func.HttpResponse):
         return claims
 
@@ -156,13 +172,18 @@ def create_project_fn(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name("update_project")
 @app.route(route="projects/{project_id}", methods=["PUT"])
 def update_project_fn(req: func.HttpRequest) -> func.HttpResponse:
-    claims = _require_auth(req)
+    # Admin-only for the same reason as create_project: rewriting
+    # system_prompt or llm_deployment affects every user of the project.
+    claims = _require_admin(req)
     if isinstance(claims, func.HttpResponse):
         return claims
 
     from .endpoints.projects import update_project
 
-    project_id = int(req.route_params["project_id"])
+    try:
+        project_id = int(req.route_params["project_id"])
+    except (KeyError, ValueError):
+        return _json_response({"error": "project_id must be an integer"}, 400)
     factory = get_session_factory()
     with factory() as session:
         result = update_project(session, project_id, _get_body(req))
@@ -225,8 +246,10 @@ def save_session_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.sessions import save_session
 
-    result = save_session(_get_body(req))
-    return _json_response(result)
+    # Ownership comes from the token subject; a username in the body is ignored.
+    result = save_session(_get_body(req), claims["sub"])
+    status_code = 403 if "error" in result else 200
+    return _json_response(result, status_code)
 
 
 @app.function_name("get_sessions")
@@ -248,13 +271,16 @@ def get_sessions_fn(req: func.HttpRequest) -> func.HttpResponse:
 @app.function_name("delete_session")
 @app.route(route="sessions/{session_id}", methods=["DELETE"])
 def delete_session_fn(req: func.HttpRequest) -> func.HttpResponse:
-    claims = _require_auth(req)
+    # Deleting is a destructive write, so guests (view-only per ADR-0003) are
+    # rejected here just as they are on save_session/save_feedback/upload.
+    claims = _require_non_guest(req)
     if isinstance(claims, func.HttpResponse):
         return claims
 
     from .endpoints.sessions import delete_session
 
-    result = delete_session(req.route_params["session_id"])
+    # Only the caller's own rows are deleted; see delete_session.
+    result = delete_session(req.route_params["session_id"], claims["sub"])
     return _json_response(result)
 
 
@@ -311,6 +337,38 @@ def get_document_fn(req: func.HttpRequest) -> func.HttpResponse:
     )
 
 
+@app.function_name("upload_document")
+@app.route(route="upload", methods=["POST"])
+def upload_document_fn(req: func.HttpRequest) -> func.HttpResponse:
+    claims = _require_non_guest(req)
+    if isinstance(claims, func.HttpResponse):
+        return claims
+
+    try:
+        file = req.files.get("file")
+        project_id_raw = req.form.get("project_id")
+    except Exception:
+        return _json_response({"error": "Expected multipart/form-data"}, 400)
+
+    if file is None or not project_id_raw:
+        return _json_response({"error": "file and project_id are required"}, 400)
+    try:
+        project_id = int(project_id_raw)
+    except ValueError:
+        return _json_response({"error": "project_id must be an integer"}, 400)
+
+    factory = get_session_factory()
+    with factory() as session:
+        if not _user_can_access_project(session, claims["sub"], project_id):
+            return _json_response({"error": "No access to this project"}, 403)
+
+    from .endpoints.upload import upload_document
+
+    result = upload_document(project_id, file.filename, file.read())
+    status = result.pop("status", 201)
+    return _json_response(result, status)
+
+
 # Audit Endpoint
 
 
@@ -323,7 +381,10 @@ def get_audit_info_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.audit import get_audit_info
 
-    project_id = int(req.route_params["project_id"])
+    try:
+        project_id = int(req.route_params["project_id"])
+    except (KeyError, ValueError):
+        return _json_response({"error": "project_id must be an integer"}, 400)
     factory = get_session_factory()
     with factory() as session:
         if not _user_can_access_project(session, claims["sub"], project_id):
@@ -355,12 +416,15 @@ def prompt_library_fn(req: func.HttpRequest) -> func.HttpResponse:
     if request_type in ("create", "update") and claims.get("role") == "guest":
         return _json_response({"error": "Read-only access for guest users"}, 403)
 
+    prompt_name = body.get("prompt_name", "")
+    prompt_content = body.get("prompt_content", "")
+
     if request_type == "create":
-        result = create_prompt(username, project, body["prompt_name"], body["prompt_content"])
+        result = create_prompt(username, project, prompt_name, prompt_content)
     elif request_type == "update":
-        result = update_prompt(username, project, body["prompt_name"], body["prompt_content"])
+        result = update_prompt(username, project, prompt_name, prompt_content)
     elif request_type == "get":
-        result = get_prompt(username, project, body["prompt_name"])
+        result = get_prompt(username, project, prompt_name)
     elif request_type == "get_all":
         result = get_all_prompts(username)
     else:
@@ -399,11 +463,18 @@ def create_magic_link_fn(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @app.function_name("verify_magic_link")
-@app.route(route="auth/verify", methods=["GET"])
+@app.route(route="auth/verify", methods=["POST"])
 def verify_magic_link_fn(req: func.HttpRequest) -> func.HttpResponse:
+    # POST with the token in the body, not GET with ?token=...: query strings
+    # end up in Function access logs, proxy logs, and Referer headers, any of
+    # which would leak a live (15-minute) credential.
     from .endpoints.auth import verify_magic_link
 
-    token = req.params.get("token", "")
+    try:
+        body = _get_body(req) or {}
+    except Exception:
+        body = {}
+    token = body.get("token", "")
     if not token:
         return _json_response({"error": "token required"}, 400)
 
