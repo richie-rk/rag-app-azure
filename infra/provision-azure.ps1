@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Provisions ALL Azure resources for rag-app-azure from scratch.
@@ -96,6 +96,12 @@ function New-RandomSecret {
     [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
     return [Convert]::ToBase64String($bytes)
 }
+
+# Failures in security-relevant steps (HTTPS/TLS hardening, Key Vault,
+# managed identities, firewall, app settings) are collected here; the script
+# exits nonzero with this list instead of printing "Provisioning Complete",
+# so a partially hardened deployment is never reported as a success.
+$provisioningErrors = @()
 
 # PRE-FLIGHT CHECKS
 
@@ -687,13 +693,26 @@ $INGEST_URL = "https://${INGEST_FUNC}.azurewebsites.net/api"
 # redirect would expose those tokens to an on-path observer. httpsOnly forces
 # the front end to 301 http->https; min-tls-version floors the negotiated TLS.
 Write-Status "Enforcing HTTPS-only + TLS 1.2 on all web/function apps..." "Cyan"
+$hardeningFailed = $false
 foreach ($siteName in @($CHAT_APP, $UI_APP, $UTILS_FUNC, $INGEST_FUNC)) {
     az webapp update --name $siteName --resource-group $RESOURCE_GROUP `
         --set httpsOnly=true --output none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Status "${siteName}: failed to enforce HTTPS-only" "Red"
+        $provisioningErrors += "${siteName}: HTTPS-only not enforced"
+        $hardeningFailed = $true
+    }
     az webapp config set --name $siteName --resource-group $RESOURCE_GROUP `
         --min-tls-version 1.2 --output none 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Status "${siteName}: failed to set minimum TLS 1.2" "Red"
+        $provisioningErrors += "${siteName}: minimum TLS 1.2 not set"
+        $hardeningFailed = $true
+    }
 }
-Write-Status "HTTPS-only + TLS 1.2 enforced" "Green"
+if (-not $hardeningFailed) {
+    Write-Status "HTTPS-only + TLS 1.2 enforced" "Green"
+}
 
 # 11. KEY VAULT + MANAGED IDENTITIES
 
@@ -724,7 +743,10 @@ if ($kvCheck) {
         if ($LASTEXITCODE -eq 0) {
             Write-Status "$KEY_VAULT recovered from soft-delete" "Green"
         } else {
-            Write-Status "Failed to create Key Vault - app settings will fall back to plaintext" "Red"
+            # configure-settings.sh refuses to write plaintext secrets without
+            # an explicit opt-in, so a missing vault fails the settings step.
+            Write-Status "Failed to create Key Vault - the app-settings step will fail" "Red"
+            $provisioningErrors += "Key Vault ${KEY_VAULT}: creation and soft-delete recovery both failed"
         }
     }
 }
@@ -752,9 +774,11 @@ foreach ($appDef in @(
             Write-Status "$($appDef.Name): managed identity granted secret read" "Green"
         } else {
             Write-Status "$($appDef.Name): failed to grant Key Vault access" "Red"
+            $provisioningErrors += "$($appDef.Name): Key Vault access policy not granted"
         }
     } else {
         Write-Status "$($appDef.Name): failed to assign managed identity" "Red"
+        $provisioningErrors += "$($appDef.Name): managed identity not assigned"
     }
 }
 
@@ -766,11 +790,32 @@ Write-Section "12/12  SQL Firewall (app outbound IPs)"
 # wildcard. Consumption-plan outbound IPs come from a regional pool and can
 # change over time; re-running this script refreshes the rules.
 if ($sqlServerReady) {
-    az sql server firewall-rule delete `
+    # One rule listing drives the cleanups below, so each delete targets a
+    # rule known to exist and its outcome can be verified (a blind delete of
+    # an absent rule would make failure checks false-positive).
+    $existingRules = az sql server firewall-rule list `
         --server $SQL_SERVER `
         --resource-group $RESOURCE_GROUP `
-        --name "AllowAzureServices" `
-        --output none 2>$null
+        --query "[].name" `
+        --output tsv 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Status "Could not list existing firewall rules" "Red"
+        $provisioningErrors += "SQL firewall: could not list existing rules; cleanup skipped"
+        $existingRules = $null
+    }
+    $existingRuleNames = @(($existingRules -split "`n") | Where-Object { $_ } | ForEach-Object { $_.Trim() })
+
+    if ($existingRuleNames -contains "AllowAzureServices") {
+        az sql server firewall-rule delete `
+            --server $SQL_SERVER `
+            --resource-group $RESOURCE_GROUP `
+            --name "AllowAzureServices" `
+            --output none 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Status "Failed to remove the AllowAzureServices wildcard rule" "Red"
+            $provisioningErrors += "SQL firewall: any-Azure-tenant wildcard rule still present"
+        }
+    }
 
     $outboundIps = @()
     $outboundIps += ((az webapp show --name $CHAT_APP --resource-group $RESOURCE_GROUP `
@@ -786,24 +831,27 @@ if ($sqlServerReady) {
         # working rules and recreate nothing, which would silently cut the
         # apps' SQL access until the next successful run.
         Write-Status "Could not resolve app outbound IPs - keeping existing firewall rules" "Yellow"
+        $provisioningErrors += "SQL firewall: app outbound IPs unresolved; rules not refreshed"
     } else {
         # Drop every existing app-outbound-* rule before recreating: when the
         # IP set shrinks between runs, higher-index rules would otherwise
         # linger and keep granting access to IPs the apps no longer use.
-        $staleRules = az sql server firewall-rule list `
-            --server $SQL_SERVER `
-            --resource-group $RESOURCE_GROUP `
-            --query "[?starts_with(name, 'app-outbound-')].name" `
-            --output tsv 2>$null
-        foreach ($staleRule in (($staleRules -split "`n") | Where-Object { $_ })) {
+        foreach ($staleRule in ($existingRuleNames | Where-Object { $_ -like "app-outbound-*" })) {
             az sql server firewall-rule delete `
                 --server $SQL_SERVER `
                 --resource-group $RESOURCE_GROUP `
-                --name $staleRule.Trim() `
+                --name $staleRule `
                 --output none 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                $provisioningErrors += "SQL firewall: stale rule $staleRule not removed"
+            }
         }
 
+        # Every create is verified: an unchecked failure here, after the old
+        # rules were purged, would silently cut the apps' SQL access while
+        # the run still reported success.
         $ruleIndex = 0
+        $rulesCreated = 0
         foreach ($ip in $uniqueIps) {
             az sql server firewall-rule create `
                 --server $SQL_SERVER `
@@ -812,9 +860,18 @@ if ($sqlServerReady) {
                 --start-ip-address $ip `
                 --end-ip-address $ip `
                 --output none 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $rulesCreated++
+            } else {
+                $provisioningErrors += "SQL firewall: rule for $ip not created"
+            }
             $ruleIndex++
         }
-        Write-Status "Added $ruleIndex outbound-IP firewall rules (wildcard rule removed)" "Green"
+        if ($rulesCreated -eq $ruleIndex) {
+            Write-Status "Added $rulesCreated outbound-IP firewall rules (wildcard rule removed)" "Green"
+        } else {
+            Write-Status "Created only $rulesCreated of $ruleIndex outbound-IP rules - apps may lack SQL access" "Red"
+        }
     }
 } else {
     Write-Status "Skipping - SQL Server not available" "Yellow"
@@ -894,21 +951,47 @@ Write-Status "ui/.env written to $uiEnvPath" "Green"
 
 Write-Section "Configuring App Settings"
 
-# Delegate to bash; PowerShell mangles special chars (&, =, ;) in az CLI args
+# Delegate to bash; PowerShell mangles special chars (&, =, ;) in az CLI args.
+# Launch is guarded: if bash never runs, $LASTEXITCODE would keep its stale
+# value from the last az call (usually 0) and falsely report success.
+# stderr is NOT suppressed - it carries the az error behind any FAILED line.
 Write-Status "Configuring all app settings via bash..." "Cyan"
 $configScript = Join-Path $PSScriptRoot "configure-settings.sh"
 $env:SUFFIX = $UNIQUE_SUFFIX
-bash $configScript 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Status "All app settings configured" "Green"
+if (Get-Command bash -ErrorAction SilentlyContinue) {
+    bash $configScript
+    if ($LASTEXITCODE -eq 0) {
+        Write-Status "All app settings configured" "Green"
+    } else {
+        Write-Status "App settings configuration FAILED - services may hold missing or stale settings" "Red"
+        $provisioningErrors += "configure-settings.sh exited nonzero (Key Vault secrets or app settings incomplete)"
+    }
 } else {
-    Write-Status "Some settings may have failed - check Azure Portal" "Yellow"
+    Write-Status "bash not found on PATH - app settings were NOT configured" "Red"
+    $provisioningErrors += "configure-settings.sh not run: bash is not available on PATH"
 }
 
-# Set startup command for chat app
-az webapp config set --name $CHAT_APP --resource-group $RESOURCE_GROUP --startup-file "startup.sh" --output none 2>$null
+# (The chat startup file is set inside configure-settings.sh, with its
+# failure tracked there - no unchecked duplicate call here.)
 
 # SUMMARY
+
+# Never report success over a partially hardened deployment: name what
+# failed and exit nonzero so CI and operators cannot miss it.
+if ($provisioningErrors.Count -gt 0) {
+    Write-Host ""
+    Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Red
+    Write-Host "║             Provisioning Completed With ERRORS              ║" -ForegroundColor Red
+    Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Red
+    Write-Host ""
+    foreach ($provisioningError in $provisioningErrors) {
+        Write-Status $provisioningError "Red"
+    }
+    Write-Host ""
+    Write-Host "  Fix the errors above and re-run this script (it is idempotent)." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
 
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
