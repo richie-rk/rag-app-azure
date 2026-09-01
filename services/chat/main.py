@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from services.shared.auth import extract_bearer_token, validate_jwt
+from services.shared.authz import user_can_access_index
 from services.shared.config import get_settings
+from services.shared.database import get_session_factory
 
 from .pipeline.citations import extract_followup_questions
 from .pipeline.llm import stream_completion
@@ -81,6 +83,19 @@ async def chat(body: ChatRequest, claims: dict = Depends(require_non_guest)):
     overrides = body.overrides
     deployment = body.deployment or settings.default_llm_deployment
 
+    # Step 0: Authorize the requested index. The index name arrives in the
+    # request body, so without this check any authenticated user could read
+    # any project's documents by guessing/enumerating index names.
+    factory = get_session_factory()
+    with factory() as session:
+        if not user_can_access_index(
+            session,
+            email=claims["sub"],
+            index_name=body.search_index,
+            role=claims.get("role"),
+        ):
+            raise HTTPException(status_code=403, detail="No access to this project")
+
     # Step 1: Hybrid search
     data_points = hybrid_search(
         query=query,
@@ -104,9 +119,15 @@ async def chat(body: ChatRequest, claims: dict = Depends(require_non_guest)):
         # First chunk: metadata + data_points
         yield make_metadata_chunk(data_points, query, deployment)
 
-        # Middle chunks: LLM content deltas
+        # Middle chunks: LLM content deltas. Text before the first "<<"
+        # follow-up marker streams out; everything from the marker on is
+        # withheld (the final chunk carries the parsed follow-up questions
+        # instead). `pending` holds text not yet emitted so that a marker
+        # split across two deltas ("<" then "<") is still caught, the text
+        # preceding a marker inside a delta is never lost, and a reply that
+        # *starts* with "<<" still engages buffering.
         full_content = ""
-        followup_buffer = ""
+        pending = ""
         buffering_followup = False
 
         async for token in stream_completion(
@@ -115,29 +136,32 @@ async def chat(body: ChatRequest, claims: dict = Depends(require_non_guest)):
             temperature=overrides.temperature,
         ):
             full_content += token
-
-            # Check for follow-up question markers
-            if "<<" in token and not buffering_followup:
-                # Split at the marker
-                pre, _, post = full_content.rpartition("<<")
-                if pre and not buffering_followup:
-                    buffering_followup = True
-                    followup_buffer = "<<" + post
-                    continue
-
             if buffering_followup:
-                followup_buffer += token
                 continue
 
-            yield make_content_chunk(token)
+            pending += token
+            marker = pending.find("<<")
+            if marker != -1:
+                if pending[:marker]:
+                    yield make_content_chunk(pending[:marker])
+                buffering_followup = True
+                pending = ""
+                continue
 
-        # Final chunk: follow-up questions
-        if followup_buffer:
-            full_for_followup = full_content
-        else:
-            full_for_followup = full_content
+            # Hold back a trailing "<" in case the next delta completes "<<".
+            if pending.endswith("<"):
+                emit, pending = pending[:-1], "<"
+            else:
+                emit, pending = pending, ""
+            if emit:
+                yield make_content_chunk(emit)
 
-        _, followup_questions = extract_followup_questions(full_for_followup)
+        # Stream ended without a follow-up marker: flush anything held back.
+        if not buffering_followup and pending:
+            yield make_content_chunk(pending)
+
+        # Final chunk: follow-up questions parsed from the full content
+        _, followup_questions = extract_followup_questions(full_content)
 
         retrieved_docs = [
             {"sourcepage": dp["sourcepage"], "id": dp["id"], "sourcefile": dp["sourcefile"]}
