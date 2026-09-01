@@ -111,7 +111,12 @@ export function useStreamChat() {
         }
         throw err;
       } finally {
-        abortRef.current = null;
+        // Only clear our own controller: if a newer sendMessage overlapped,
+        // abortRef already points at its controller and nulling it here
+        // would break that turn's Stop button.
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
       }
     },
     [token],
