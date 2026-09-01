@@ -90,12 +90,23 @@ def _user_can_access_project(session, email: str, project_id: int) -> bool:
     return access is not None
 
 
-def _user_can_access_file(session, email: str, file_name: str) -> bool:
+def _user_can_access_file(
+    session, email: str, file_name: str, role: str | None = None
+) -> bool:
     """True if file_name was ingested into a project the user can access.
 
     With a single shared blob container, ingestion_audit is the only record
     of which project a file belongs to, so it is the authority for blob reads.
+    Platform admins may read any ingested file, but the audit row must still
+    exist so the endpoint can never fetch arbitrary blobs.
     """
+    if role == "admin":
+        match = (
+            session.query(IngestionAudit)
+            .filter(IngestionAudit.source_file == file_name)
+            .first()
+        )
+        return match is not None
     user = session.query(User).filter(User.email == email).first()
     if not user:
         return False
@@ -320,7 +331,9 @@ def get_document_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     factory = get_session_factory()
     with factory() as session:
-        if not _user_can_access_file(session, claims["sub"], file_name):
+        if not _user_can_access_file(
+            session, claims["sub"], file_name, claims.get("role")
+        ):
             # Uniform 404 whether the file is missing or simply off-limits, so
             # the endpoint never confirms which filenames exist.
             return _json_response({"error": "Document not found"}, 404)
@@ -337,12 +350,27 @@ def get_document_fn(req: func.HttpRequest) -> func.HttpResponse:
     )
 
 
+# Application-level upload cap, well under the Functions host's 100 MB body
+# limit: multipart parsing and file.read() buffer the whole payload in worker
+# memory, so near-limit uploads are rejected before that cost is paid.
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
 @app.function_name("upload_document")
 @app.route(route="upload", methods=["POST"])
 def upload_document_fn(req: func.HttpRequest) -> func.HttpResponse:
     claims = _require_non_guest(req)
     if isinstance(claims, func.HttpResponse):
         return claims
+
+    # Cheap pre-parse rejection via Content-Length; the bounded read below
+    # still catches a client that lies about (or omits) the header.
+    try:
+        content_length = int(req.headers.get("Content-Length") or 0)
+    except ValueError:
+        content_length = 0
+    if content_length > _MAX_UPLOAD_BYTES:
+        return _json_response({"error": "File too large (50 MB limit)"}, 413)
 
     try:
         file = req.files.get("file")
@@ -359,12 +387,20 @@ def upload_document_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     factory = get_session_factory()
     with factory() as session:
-        if not _user_can_access_project(session, claims["sub"], project_id):
+        # Platform admins may upload to any project (the ingestion starter
+        # applies the same bypass); everyone else needs an access row.
+        if claims.get("role") != "admin" and not _user_can_access_project(
+            session, claims["sub"], project_id
+        ):
             return _json_response({"error": "No access to this project"}, 403)
 
     from .endpoints.upload import upload_document
 
-    result = upload_document(project_id, file.filename, file.read())
+    data = file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(data) > _MAX_UPLOAD_BYTES:
+        return _json_response({"error": "File too large (50 MB limit)"}, 413)
+
+    result = upload_document(project_id, file.filename, data)
     status = result.pop("status", 201)
     return _json_response(result, status)
 
@@ -387,7 +423,11 @@ def get_audit_info_fn(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"error": "project_id must be an integer"}, 400)
     factory = get_session_factory()
     with factory() as session:
-        if not _user_can_access_project(session, claims["sub"], project_id):
+        # Admins may inspect any project's ingestion history, same policy as
+        # upload and the ingestion starter.
+        if claims.get("role") != "admin" and not _user_can_access_project(
+            session, claims["sub"], project_id
+        ):
             return _json_response({"error": "No access to this project"}, 403)
         result = get_audit_info(session, project_id)
     return _json_response(result)
