@@ -5,9 +5,6 @@ import {
   tokens,
   Text,
   Button,
-  Input,
-  Field,
-  Divider,
   Spinner,
 } from "@fluentui/react-components";
 import {
@@ -66,24 +63,16 @@ const useStyles = makeStyles({
     fontSize: "15px",
     fontWeight: tokens.fontWeightSemibold,
   },
-  divider: {
+  guestNote: {
     width: "100%",
-    margin: "24px 0",
-  },
-  emailSection: {
-    width: "100%",
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-  },
-  emailLabel: {
-    fontSize: "14px",
-    color: tokens.colorNeutralForeground2,
-    fontWeight: tokens.fontWeightSemibold,
-  },
-  sendButton: {
-    width: "100%",
-    height: "38px",
+    textAlign: "center",
+    marginTop: "20px",
+    padding: "12px 16px",
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: "8px",
+    color: tokens.colorNeutralForeground3,
+    fontSize: "13px",
+    lineHeight: "1.5",
   },
   footer: {
     display: "flex",
@@ -96,15 +85,6 @@ const useStyles = makeStyles({
   footerIcon: {
     fontSize: "14px",
   },
-  sentMessage: {
-    width: "100%",
-    textAlign: "center",
-    padding: "16px",
-    backgroundColor: tokens.colorNeutralBackground3,
-    borderRadius: "8px",
-    color: tokens.colorNeutralForeground2,
-    fontSize: "14px",
-  },
 });
 
 export function LoginPage() {
@@ -112,20 +92,24 @@ export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
   const [verifying, setVerifying] = useState(false);
 
-  // Handle magic link verification
+  // Handle magic link verification. The token goes in a POST body (never a
+  // query string on the API call, which would land in server/proxy logs), and
+  // the navigation replaces this history entry so the token-bearing URL does
+  // not stay reachable via the back button.
   const token = searchParams.get("token");
   useEffect(() => {
     if (token && !verifying) {
       setVerifying(true);
-      apiClient(`/auth/verify?token=${token}`)
+      apiClient("/auth/verify", {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      })
         .then((result) => {
           if (result.token) {
             localStorage.setItem("rag_auth_token", result.token);
-            navigate("/chat");
+            navigate("/chat", { replace: true });
           }
         })
         .catch(() => setVerifying(false));
@@ -139,15 +123,6 @@ export function LoginPage() {
       </div>
     );
   }
-
-  const handleMagicLink = async () => {
-    if (!email) return;
-    await apiClient("/auth/magic-link", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
-    setSent(true);
-  };
 
   return (
     <div className={styles.root}>
@@ -175,35 +150,11 @@ export function LoginPage() {
           Sign in with Microsoft
         </Button>
 
-        <Divider className={styles.divider}>or</Divider>
-
-        <div className={styles.emailSection}>
-          {sent ? (
-            <div className={styles.sentMessage}>
-              Check your email for a sign-in link.
-            </div>
-          ) : (
-            <>
-              <Text className={styles.emailLabel}>Sign in with email</Text>
-              <Field>
-                <Input
-                  type="email"
-                  value={email}
-                  onChange={(_, d) => setEmail(d.value)}
-                  placeholder="your@email.com"
-                  size="large"
-                />
-              </Field>
-              <Button
-                appearance="secondary"
-                className={styles.sendButton}
-                onClick={handleMagicLink}
-                disabled={!email}
-              >
-                Send sign-in link
-              </Button>
-            </>
-          )}
+        {/* Magic links are admin-issued invitations (the backend endpoint is
+            admin-only); there is deliberately no self-service sender here. */}
+        <div className={styles.guestNote}>
+          Guest access is by invitation. Ask an administrator to send you a
+          sign-in link.
         </div>
 
         <div className={styles.footer}>

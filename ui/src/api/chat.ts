@@ -10,6 +10,7 @@ const CHAT_API = import.meta.env.VITE_CHAT_API_URL || "";
 export async function streamChat(
   request: ChatRequest,
   token: string,
+  signal?: AbortSignal,
 ): Promise<ReadableStream<string>> {
   const response = await fetch(`${CHAT_API}/chat`, {
     method: "POST",
@@ -18,10 +19,16 @@ export async function streamChat(
       Authorization: `Bearer ${token}`,
     },
     body: JSON.stringify(request),
+    signal,
   });
 
   if (!response.ok) {
-    throw new Error(`Chat request failed: ${response.statusText}`);
+    // Surface the backend's error detail (e.g. "No access to this project")
+    // rather than just the status text.
+    const err = await response.json().catch(() => null);
+    throw new Error(
+      err?.detail || err?.error || `Chat request failed: ${response.statusText}`,
+    );
   }
 
   if (!response.body) {

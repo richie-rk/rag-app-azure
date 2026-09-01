@@ -17,6 +17,7 @@ import { FileUpload } from "../components/FileUpload";
 import { ProjectSelector } from "../components/ProjectSelector";
 import { useProjects } from "../hooks/useProjects";
 import { triggerIngestion, getAuditInfo } from "../api/ingestion";
+import { uploadDocument } from "../api/upload";
 
 const useStyles = makeStyles({
   root: {
@@ -66,6 +67,11 @@ const useStyles = makeStyles({
   },
 });
 
+/** Ingested files are keyed "{project_id}/name"; show just the name. */
+function displayFileName(sourceFile: string): string {
+  return (sourceFile || "").replace(/^\d+\//, "");
+}
+
 export function DataLoaderPage() {
   const styles = useStyles();
   const { projects, selectedProject, setSelectedProject } = useProjects();
@@ -87,15 +93,13 @@ export function DataLoaderPage() {
     loadAudit();
   }, [loadAudit]);
 
-  const handleUpload = async (_files: File[]) => {
-    if (!selectedProject) return;
-    await triggerIngestion({
-      project_name: selectedProject.name,
-      index_name: selectedProject.index_name,
-      container_name: selectedProject.name.toLowerCase().replace(/\s/g, "-"),
-      project_id: selectedProject.id,
-      chunking_strategy: selectedProject.chunking_strategy,
-    });
+  const handleUpload = async (files: File[]) => {
+    if (!selectedProject || files.length === 0) return;
+    // Upload each file into the project's prefix, then trigger ingestion.
+    // The ingestion service derives index/container/prefix/chunking from the
+    // project row server-side, so only the project id is sent.
+    await Promise.all(files.map((f) => uploadDocument(f, selectedProject.id)));
+    await triggerIngestion({ project_id: selectedProject.id });
     loadAudit();
   };
 
@@ -142,7 +146,7 @@ export function DataLoaderPage() {
                 ) : (
                   audit.map((row, i) => (
                     <TableRow key={i}>
-                      <TableCell>{row.source_file}</TableCell>
+                      <TableCell>{displayFileName(row.source_file)}</TableCell>
                       <TableCell>
                         <Badge
                           className={styles.statusBadge}
