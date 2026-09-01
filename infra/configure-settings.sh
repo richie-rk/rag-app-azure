@@ -1,12 +1,22 @@
 #!/bin/bash
-# Configure app settings for all Azure services
-# Run this from bash if the PowerShell script's settings step fails
+# Configure app settings for all Azure services.
+# Invoked by provision-azure.ps1 (which exports SUFFIX); can also be run
+# standalone from bash if the PowerShell script's settings step fails.
+#
+# Secrets are pushed into Key Vault and the app settings hold only
+# @Microsoft.KeyVault(...) references, so plaintext secrets never sit in
+# App Settings where anyone with Reader on the resource group could see
+# them. Requires the vault + managed identities provisioned by
+# provision-azure.ps1; if the vault is missing this falls back to plaintext
+# settings with a loud warning so a deploy still works.
 
-RG="ragapp-rg"
-CHAT="ragapp-chat-6010"
-UI="ragapp-ui-6010"
-UTILS="ragapp-utils-6010"
-INGEST="ragapp-ingest-6010"
+SUFFIX="${SUFFIX:-6010}"
+RG="${RG:-ragapp-rg}"
+CHAT="${CHAT:-ragapp-chat-$SUFFIX}"
+UI="${UI:-ragapp-ui-$SUFFIX}"
+UTILS="${UTILS:-ragapp-utils-$SUFFIX}"
+INGEST="${INGEST:-ragapp-ingest-$SUFFIX}"
+KV="${KV:-ragapp-kv-$SUFFIX}"
 
 # Read values from .env
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,22 +43,49 @@ CHAT_URL="https://${CHAT}.azurewebsites.net"
 UTILS_URL="https://${UTILS}.azurewebsites.net/api"
 INGEST_URL="https://${INGEST}.azurewebsites.net/api"
 
+# Push secrets to Key Vault; build reference-or-plaintext setting values.
+kv_ref() { echo "@Microsoft.KeyVault(SecretUri=https://${KV}.vault.azure.net/secrets/$1/)"; }
+
+if az keyvault show --name "$KV" --resource-group "$RG" --output none 2>/dev/null; then
+  echo "=== Key Vault secrets ==="
+  az keyvault secret set --vault-name "$KV" --name "database-url" --value "$DB_URL" --output none \
+    && az keyvault secret set --vault-name "$KV" --name "jwt-secret" --value "$JWT" --output none \
+    && az keyvault secret set --vault-name "$KV" --name "azure-openai-api-key" --value "$OAI_KEY" --output none \
+    && az keyvault secret set --vault-name "$KV" --name "azure-search-admin-key" --value "$SEARCH_KEY" --output none \
+    && az keyvault secret set --vault-name "$KV" --name "azure-storage-connection-string" --value "$STORAGE_CONN" --output none \
+    && echo "  OK" || echo "  FAILED"
+
+  DB_URL_SETTING=$(kv_ref database-url)
+  JWT_SETTING=$(kv_ref jwt-secret)
+  OAI_KEY_SETTING=$(kv_ref azure-openai-api-key)
+  SEARCH_KEY_SETTING=$(kv_ref azure-search-admin-key)
+  STORAGE_CONN_SETTING=$(kv_ref azure-storage-connection-string)
+else
+  echo "WARNING: Key Vault '$KV' not found - writing PLAINTEXT secrets to app settings."
+  echo "         Run provision-azure.ps1 to create the vault and managed identities."
+  DB_URL_SETTING="$DB_URL"
+  JWT_SETTING="$JWT"
+  OAI_KEY_SETTING="$OAI_KEY"
+  SEARCH_KEY_SETTING="$SEARCH_KEY"
+  STORAGE_CONN_SETTING="$STORAGE_CONN"
+fi
+
 echo "=== Chat Web App ==="
 az webapp config appsettings set --name "$CHAT" --resource-group "$RG" --output none --settings \
-  "DATABASE_URL=$DB_URL" \
+  "DATABASE_URL=$DB_URL_SETTING" \
   "AZURE_OPENAI_ENDPOINT=$OAI_ENDPOINT" \
-  "AZURE_OPENAI_API_KEY=$OAI_KEY" \
+  "AZURE_OPENAI_API_KEY=$OAI_KEY_SETTING" \
   "AZURE_OPENAI_API_VERSION=$OAI_VER" \
   "DEFAULT_LLM_DEPLOYMENT=$LLM" \
   "EMBEDDING_DEPLOYMENT=$EMBED" \
   "EMBEDDING_DIMENSIONS=$EMBED_DIMS" \
   "AZURE_SEARCH_ENDPOINT=$SEARCH_EP" \
-  "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY" \
-  "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN" \
+  "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY_SETTING" \
+  "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN_SETTING" \
   "DEFAULT_BLOB_CONTAINER=$BLOB_CONTAINER" \
   "AZURE_TABLE_NAME=$TABLE_NAME" \
   "DEFAULT_TOP_K=$TOP_K" \
-  "JWT_SECRET=$JWT" \
+  "JWT_SECRET=$JWT_SETTING" \
   "ALLOWED_ORIGINS=$UI_URL" \
   "SCM_DO_BUILD_DURING_DEPLOYMENT=true" && echo "  OK" || echo "  FAILED"
 
@@ -65,25 +102,25 @@ az webapp config appsettings set --name "$UI" --resource-group "$RG" --output no
 
 echo "=== Utils Function App ==="
 az functionapp config appsettings set --name "$UTILS" --resource-group "$RG" --output none --settings \
-  "DATABASE_URL=$DB_URL" \
-  "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN" \
+  "DATABASE_URL=$DB_URL_SETTING" \
+  "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN_SETTING" \
   "AZURE_TABLE_NAME=$TABLE_NAME" \
   "DEFAULT_BLOB_CONTAINER=$BLOB_CONTAINER" \
-  "JWT_SECRET=$JWT" \
+  "JWT_SECRET=$JWT_SETTING" \
   "AZURE_SEARCH_ENDPOINT=$SEARCH_EP" \
-  "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY" && echo "  OK" || echo "  FAILED"
+  "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY_SETTING" && echo "  OK" || echo "  FAILED"
 
 echo "=== Ingestion Function App ==="
 az functionapp config appsettings set --name "$INGEST" --resource-group "$RG" --output none --settings \
-  "DATABASE_URL=$DB_URL" \
+  "DATABASE_URL=$DB_URL_SETTING" \
   "AZURE_OPENAI_ENDPOINT=$OAI_ENDPOINT" \
-  "AZURE_OPENAI_API_KEY=$OAI_KEY" \
+  "AZURE_OPENAI_API_KEY=$OAI_KEY_SETTING" \
   "AZURE_OPENAI_API_VERSION=$OAI_VER" \
   "EMBEDDING_DEPLOYMENT=$EMBED" \
   "EMBEDDING_DIMENSIONS=$EMBED_DIMS" \
   "AZURE_SEARCH_ENDPOINT=$SEARCH_EP" \
-  "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY" \
-  "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN" \
+  "AZURE_SEARCH_ADMIN_KEY=$SEARCH_KEY_SETTING" \
+  "AZURE_STORAGE_CONNECTION_STRING=$STORAGE_CONN_SETTING" \
   "DEFAULT_BLOB_CONTAINER=$BLOB_CONTAINER" && echo "  OK" || echo "  FAILED"
 
 echo ""

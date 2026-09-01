@@ -52,6 +52,7 @@ $CHAT_APP          = "${PROJECT_PREFIX}-chat-${UNIQUE_SUFFIX}"
 $UI_APP            = "${PROJECT_PREFIX}-ui-${UNIQUE_SUFFIX}"
 $UTILS_FUNC        = "${PROJECT_PREFIX}-utils-${UNIQUE_SUFFIX}"
 $INGEST_FUNC       = "${PROJECT_PREFIX}-ingest-${UNIQUE_SUFFIX}"
+$KEY_VAULT         = "${PROJECT_PREFIX}-kv-${UNIQUE_SUFFIX}"
 
 # Constants
 $BLOB_CONTAINER    = "documents"
@@ -154,8 +155,19 @@ if (-not $sqlCheck) {
     }
 }
 
-# Generate JWT secret
-$JWT_SECRET = New-RandomSecret
+# JWT secret: reuse the one in .env when present so re-provisioning does not
+# invalidate every issued token; generate a fresh one only on first run.
+$JWT_SECRET = $null
+$existingEnv = Join-Path (Split-Path $PSScriptRoot -Parent) ".env"
+if (Test-Path $existingEnv) {
+    $jwtLine = Get-Content $existingEnv | Where-Object { $_ -match "^JWT_SECRET=(.+)$" } | Select-Object -First 1
+    if ($jwtLine -match "^JWT_SECRET=(.+)$") {
+        $JWT_SECRET = $Matches[1].Trim()
+    }
+}
+if (-not $JWT_SECRET) {
+    $JWT_SECRET = New-RandomSecret
+}
 
 # Detect current public IP for SQL firewall
 Write-Status "Detecting public IP for SQL firewall..." "Cyan"
@@ -176,7 +188,7 @@ Write-Host ""
 
 # 1. RESOURCE GROUP
 
-Write-Section "1/10  Resource Group"
+Write-Section "1/12  Resource Group"
 
 # If RG is mid-deletion from a prior teardown, wait for it to finish
 $rgState = az group show --name $RESOURCE_GROUP --query properties.provisioningState --output tsv 2>$null
@@ -210,7 +222,7 @@ if ($rgVerify -ne "Succeeded") {
 
 # 2. STORAGE ACCOUNT
 
-Write-Section "2/10  Storage Account"
+Write-Section "2/12  Storage Account"
 
 $storageCheck = az storage account show --name $STORAGE_ACCOUNT --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($storageCheck) {
@@ -275,7 +287,7 @@ if ($LASTEXITCODE -eq 0) {
 
 # 3. AZURE SQL
 
-Write-Section "3/10  Azure SQL Server + Database"
+Write-Section "3/12  Azure SQL Server + Database"
 
 $sqlCheck = az sql server show --name $SQL_SERVER --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($sqlCheck) {
@@ -300,20 +312,16 @@ if ($sqlCheck) {
 # Check SQL server actually exists before configuring firewall & database
 $sqlServerReady = az sql server show --name $SQL_SERVER --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($sqlServerReady) {
-    # Firewall: allow Azure services
+    # Firewall: the 0.0.0.0 "AllowAzureServices" rule admits traffic from ANY
+    # Azure tenant, so it is not created. Per-app rules for the web/function
+    # apps' outbound IPs are added in the hardening section after those apps
+    # exist. Remove the wildcard rule if a previous run created it.
     Write-Status "Configuring firewall rules..." "Cyan"
-    az sql server firewall-rule create `
+    az sql server firewall-rule delete `
         --server $SQL_SERVER `
         --resource-group $RESOURCE_GROUP `
         --name "AllowAzureServices" `
-        --start-ip-address 0.0.0.0 `
-        --end-ip-address 0.0.0.0 `
         --output none 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Status "Firewall rule: Azure services allowed" "Green"
-    } else {
-        Write-Status "Failed to create Azure services firewall rule" "Red"
-    }
 
     if ($devIp) {
         az sql server firewall-rule create `
@@ -377,7 +385,7 @@ $DATABASE_URL = "mssql+pyodbc://${SQL_ADMIN_USER}:${encodedPassword}@${SQL_FQDN}
 
 # 4. AZURE AI SEARCH
 
-Write-Section "4/10  Azure AI Search"
+Write-Section "4/12  Azure AI Search"
 
 $searchCheck = az search service show --name $SEARCH_SERVICE --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($searchCheck) {
@@ -418,7 +426,7 @@ $SEARCH_ADMIN_KEY = az search admin-key show `
 
 # 5. AZURE OPENAI
 
-Write-Section "5/10  Azure OpenAI"
+Write-Section "5/12  Azure OpenAI"
 
 $openaiCheck = az cognitiveservices account show --name $OPENAI_ACCOUNT --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($openaiCheck) {
@@ -523,7 +531,7 @@ if ($llmCheck) {
 
 # 6. APP SERVICE PLAN (Free F1)
 
-Write-Section "6/10  App Service Plan"
+Write-Section "6/12  App Service Plan"
 
 $planCheck = az appservice plan show --name $APP_PLAN --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($planCheck) {
@@ -560,7 +568,7 @@ if ($planCheck) {
 
 # 7. CHAT WEB APP
 
-Write-Section "7/10  Chat Web App (FastAPI)"
+Write-Section "7/12  Chat Web App (FastAPI)"
 
 $chatCheck = az webapp show --name $CHAT_APP --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($chatCheck) {
@@ -571,6 +579,7 @@ if ($chatCheck) {
         --resource-group $RESOURCE_GROUP `
         --plan $APP_PLAN `
         --runtime "PYTHON:3.11" `
+        --https-only true `
         --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$CHAT_APP created (Python 3.11)" "Green"
@@ -585,7 +594,7 @@ $CHAT_URL = "https://${CHAT_APP}.azurewebsites.net"
 
 # 8. UI WEB APP
 
-Write-Section "8/10  UI Web App (React)"
+Write-Section "8/12  UI Web App (React)"
 
 $uiCheck = az webapp show --name $UI_APP --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($uiCheck) {
@@ -596,6 +605,7 @@ if ($uiCheck) {
         --resource-group $RESOURCE_GROUP `
         --plan $APP_PLAN `
         --runtime "NODE:20-lts" `
+        --https-only true `
         --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$UI_APP created (Node 20)" "Green"
@@ -610,7 +620,7 @@ $UI_URL = "https://${UI_APP}.azurewebsites.net"
 
 # 9. UTILS FUNCTION APP (Consumption)
 
-Write-Section "9/10  Utils Function App"
+Write-Section "9/12  Utils Function App"
 
 $utilsCheck = az functionapp show --name $UTILS_FUNC --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($utilsCheck) {
@@ -625,6 +635,7 @@ if ($utilsCheck) {
         --runtime-version 3.11 `
         --functions-version 4 `
         --os-type Linux `
+        --https-only true `
         --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$UTILS_FUNC created (Consumption plan in $COMPUTE_LOCATION)" "Green"
@@ -639,7 +650,7 @@ $UTILS_URL = "https://${UTILS_FUNC}.azurewebsites.net/api"
 
 # 10. INGESTION FUNCTION APP (Consumption)
 
-Write-Section "10/10  Ingestion Function App"
+Write-Section "10/12  Ingestion Function App"
 
 $ingestCheck = az functionapp show --name $INGEST_FUNC --resource-group $RESOURCE_GROUP --output json 2>$null
 if ($ingestCheck) {
@@ -654,6 +665,7 @@ if ($ingestCheck) {
         --runtime-version 3.11 `
         --functions-version 4 `
         --os-type Linux `
+        --https-only true `
         --output none 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Status "$INGEST_FUNC created (Consumption plan in $COMPUTE_LOCATION)" "Green"
@@ -666,24 +678,127 @@ if ($ingestCheck) {
 
 $INGEST_URL = "https://${INGEST_FUNC}.azurewebsites.net/api"
 
-# CONFIGURE APP SETTINGS
+# HTTPS-ONLY + MIN TLS ON ALL SITES
+#
+# Applied idempotently (not just on --https-only at create) so re-runs harden
+# apps created before this section existed. Every one of these endpoints
+# authenticates with an Authorization: Bearer <JWT> header (and utils also
+# handles single-use magic-link tokens), so serving plaintext http:// with no
+# redirect would expose those tokens to an on-path observer. httpsOnly forces
+# the front end to 301 http->https; min-tls-version floors the negotiated TLS.
+Write-Status "Enforcing HTTPS-only + TLS 1.2 on all web/function apps..." "Cyan"
+foreach ($siteName in @($CHAT_APP, $UI_APP, $UTILS_FUNC, $INGEST_FUNC)) {
+    az webapp update --name $siteName --resource-group $RESOURCE_GROUP `
+        --set httpsOnly=true --output none 2>$null
+    az webapp config set --name $siteName --resource-group $RESOURCE_GROUP `
+        --min-tls-version 1.2 --output none 2>$null
+}
+Write-Status "HTTPS-only + TLS 1.2 enforced" "Green"
 
-Write-Section "Configuring App Settings"
+# 11. KEY VAULT + MANAGED IDENTITIES
 
-# Delegate to bash; PowerShell mangles special chars (&, =, ;) in az CLI args
-Write-Status "Configuring all app settings via bash..." "Cyan"
-$configScript = Join-Path $PSScriptRoot "configure-settings.sh"
-bash $configScript 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Status "All app settings configured" "Green"
+Write-Section "11/12  Key Vault + Managed Identities"
+
+# Secrets live in Key Vault; app settings hold only @Microsoft.KeyVault(...)
+# references, so nobody with mere Reader on the resource group can lift the
+# JWT secret or service keys from the portal, and rotation is one secret-set.
+$kvCheck = az keyvault show --name $KEY_VAULT --resource-group $RESOURCE_GROUP --output json 2>$null
+if ($kvCheck) {
+    Write-Status "$KEY_VAULT already exists" "Yellow"
 } else {
-    Write-Status "Some settings may have failed - check Azure Portal" "Yellow"
+    # Access-policy model (not RBAC) so this script can grant the app
+    # identities secret-read without needing role-assignment rights.
+    az keyvault create `
+        --name $KEY_VAULT `
+        --resource-group $RESOURCE_GROUP `
+        --location $COMPUTE_LOCATION `
+        --enable-rbac-authorization false `
+        --output none 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Status "$KEY_VAULT created" "Green"
+    } else {
+        # A vault deleted with its resource group lingers in soft-deleted
+        # state under the same name; recover it instead of failing.
+        Write-Status "Create failed - trying to recover a soft-deleted vault..." "Yellow"
+        az keyvault recover --name $KEY_VAULT --output none 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "$KEY_VAULT recovered from soft-delete" "Green"
+        } else {
+            Write-Status "Failed to create Key Vault - app settings will fall back to plaintext" "Red"
+        }
+    }
 }
 
-# Set startup command for chat app
-az webapp config set --name $CHAT_APP --resource-group $RESOURCE_GROUP --startup-file "startup.sh" --output none 2>$null
+# System-assigned managed identity for every service that reads secrets,
+# each granted get/list on secrets only.
+foreach ($appDef in @(
+    @{ Name = $CHAT_APP;    Kind = "webapp" },
+    @{ Name = $UTILS_FUNC;  Kind = "functionapp" },
+    @{ Name = $INGEST_FUNC; Kind = "functionapp" }
+)) {
+    $principalId = az $appDef.Kind identity assign `
+        --name $appDef.Name `
+        --resource-group $RESOURCE_GROUP `
+        --query principalId `
+        --output tsv 2>$null
+    if ($principalId) {
+        az keyvault set-policy `
+            --name $KEY_VAULT `
+            --resource-group $RESOURCE_GROUP `
+            --object-id $principalId `
+            --secret-permissions get list `
+            --output none 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Status "$($appDef.Name): managed identity granted secret read" "Green"
+        } else {
+            Write-Status "$($appDef.Name): failed to grant Key Vault access" "Red"
+        }
+    } else {
+        Write-Status "$($appDef.Name): failed to assign managed identity" "Red"
+    }
+}
+
+# 12. SQL FIREWALL: APP OUTBOUND IPs
+
+Write-Section "12/12  SQL Firewall (app outbound IPs)"
+
+# Named rules per app outbound IP instead of the 0.0.0.0 any-Azure-tenant
+# wildcard. Consumption-plan outbound IPs come from a regional pool and can
+# change over time; re-running this script refreshes the rules.
+if ($sqlServerReady) {
+    az sql server firewall-rule delete `
+        --server $SQL_SERVER `
+        --resource-group $RESOURCE_GROUP `
+        --name "AllowAzureServices" `
+        --output none 2>$null
+
+    $outboundIps = @()
+    $outboundIps += ((az webapp show --name $CHAT_APP --resource-group $RESOURCE_GROUP `
+        --query possibleOutboundIpAddresses --output tsv 2>$null) -split ",")
+    foreach ($funcName in @($UTILS_FUNC, $INGEST_FUNC)) {
+        $outboundIps += ((az functionapp show --name $funcName --resource-group $RESOURCE_GROUP `
+            --query possibleOutboundIpAddresses --output tsv 2>$null) -split ",")
+    }
+    $uniqueIps = $outboundIps | Where-Object { $_ } | ForEach-Object { $_.Trim() } | Select-Object -Unique
+
+    $ruleIndex = 0
+    foreach ($ip in $uniqueIps) {
+        az sql server firewall-rule create `
+            --server $SQL_SERVER `
+            --resource-group $RESOURCE_GROUP `
+            --name "app-outbound-$ruleIndex" `
+            --start-ip-address $ip `
+            --end-ip-address $ip `
+            --output none 2>$null
+        $ruleIndex++
+    }
+    Write-Status "Added $ruleIndex outbound-IP firewall rules (wildcard rule removed)" "Green"
+} else {
+    Write-Status "Skipping - SQL Server not available" "Yellow"
+}
 
 # GENERATE .env FILE
+# (before app settings: configure-settings.sh reads its values from .env)
 
 Write-Section "Generating .env for Local Development"
 
@@ -740,6 +855,7 @@ $uiEnvContent = @"
 # UI environment, auto-generated by provision-azure.ps1
 VITE_CHAT_API_URL=http://localhost:8000
 VITE_UTILS_API_URL=http://localhost:7071/api
+VITE_INGESTION_API_URL=http://localhost:7072/api
 VITE_MSAL_CLIENT_ID=SET_AFTER_AD_APP_REGISTRATION
 VITE_MSAL_TENANT_ID=SET_AFTER_AD_APP_REGISTRATION
 VITE_MSAL_REDIRECT_URI=http://localhost:5173
@@ -747,6 +863,27 @@ VITE_MSAL_REDIRECT_URI=http://localhost:5173
 
 Set-Content -Path $uiEnvPath -Value $uiEnvContent -Encoding UTF8
 Write-Status "ui/.env written to $uiEnvPath" "Green"
+
+# CONFIGURE APP SETTINGS
+# (after .env generation: configure-settings.sh reads its values from .env,
+# pushes the secrets into Key Vault, and writes Key Vault references into
+# the app settings)
+
+Write-Section "Configuring App Settings"
+
+# Delegate to bash; PowerShell mangles special chars (&, =, ;) in az CLI args
+Write-Status "Configuring all app settings via bash..." "Cyan"
+$configScript = Join-Path $PSScriptRoot "configure-settings.sh"
+$env:SUFFIX = $UNIQUE_SUFFIX
+bash $configScript 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Status "All app settings configured" "Green"
+} else {
+    Write-Status "Some settings may have failed - check Azure Portal" "Yellow"
+}
+
+# Set startup command for chat app
+az webapp config set --name $CHAT_APP --resource-group $RESOURCE_GROUP --startup-file "startup.sh" --output none 2>$null
 
 # SUMMARY
 
@@ -770,6 +907,7 @@ Write-Host "  AI Search            : $SEARCH_ENDPOINT"
 Write-Host "  Azure OpenAI         : $OPENAI_ENDPOINT"
 Write-Host "    Embedding model    : $EMBED_DEPLOYMENT"
 Write-Host "    Chat LLM           : $LLM_DEPLOYMENT"
+Write-Host "  Key Vault            : $KEY_VAULT (secrets via managed identity)"
 Write-Host "  App Service Plan     : $APP_PLAN"
 Write-Host "  Chat Web App         : $CHAT_URL"
 Write-Host "  UI Web App           : $UI_URL"

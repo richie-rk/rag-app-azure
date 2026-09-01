@@ -58,6 +58,16 @@ if ($confirmation -ne $ResourceGroup) {
     exit 0
 }
 
+# Key Vaults soft-delete on removal and keep their name reserved for 90 days,
+# which would block a re-provision under the same suffix. Delete and purge
+# them explicitly before the resource group goes.
+$vaults = az keyvault list --resource-group $ResourceGroup --query "[].name" --output tsv 2>$null
+foreach ($vault in ($vaults -split "`n" | Where-Object { $_ })) {
+    Write-Host "  Purging Key Vault '$vault' (delete + purge)..." -ForegroundColor Cyan
+    az keyvault delete --name $vault --resource-group $ResourceGroup --output none 2>$null
+    az keyvault purge --name $vault --output none 2>$null
+}
+
 Write-Host ""
 Write-Host "  Deleting resource group '$ResourceGroup'..." -ForegroundColor Cyan
 Write-Host "  (This may take 2-5 minutes)" -ForegroundColor Gray
