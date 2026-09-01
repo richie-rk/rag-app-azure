@@ -40,7 +40,11 @@ def _blob_path(project: str, prompt_name: str) -> str | None:
     """
     for segment in (project, prompt_name):
         if (
-            not segment
+            # JSON bodies can carry non-string values (e.g. "project": 1);
+            # without this check the `in` tests below raise TypeError (500)
+            # instead of returning the intended 400.
+            not isinstance(segment, str)
+            or not segment
             or ".." in segment
             or "/" in segment
             or "\\" in segment

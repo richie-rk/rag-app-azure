@@ -445,7 +445,14 @@ def prompt_library_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     from .endpoints.prompts import create_prompt, get_all_prompts, get_prompt, update_prompt
 
-    body = _get_body(req)
+    # Malformed JSON or a non-dict body (e.g. a bare list) must land on the
+    # 400 path below, not raise into a 500.
+    try:
+        body = _get_body(req)
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
     request_type = body.get("request_type", "")
     # The prompt library is per-user; its owner is the token subject, never a
     # body field, so one user cannot reach another user's library.
@@ -458,6 +465,10 @@ def prompt_library_fn(req: func.HttpRequest) -> func.HttpResponse:
 
     prompt_name = body.get("prompt_name", "")
     prompt_content = body.get("prompt_content", "")
+    # prompt_name is validated downstream by _blob_path, but a non-string
+    # prompt_content would only fail inside blob upload_blob (TypeError, 500).
+    if request_type in ("create", "update") and not isinstance(prompt_content, str):
+        return _json_response({"error": "prompt_content must be a string"}, 400)
 
     if request_type == "create":
         result = create_prompt(username, project, prompt_name, prompt_content)
