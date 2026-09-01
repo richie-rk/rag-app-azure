@@ -39,6 +39,10 @@ def process_file(
     """
     settings = get_settings()
     blob_service = get_blob_service_client()
+    # blob_name is the project-prefixed key ("{project_id}/report.pdf"); it is
+    # the file's identity in the search index (sourcefile) and ingestion_audit,
+    # so a citation resolves back through get_document. basename is only for
+    # picking a parser by extension and naming the temp file.
     filename = os.path.basename(blob_name)
     _, ext = os.path.splitext(filename)
 
@@ -69,9 +73,6 @@ def process_file(
             logger.info("File '%s' already indexed with same hash, skipping", blob_name)
             return {"file": blob_name, "status": "skipped", "reason": "already indexed"}
 
-    # If file exists but hash changed, remove old chunks
-    remove_existing_chunks(index_name, filename)
-
     # Write to temp file for parsing
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(blob_data)
@@ -90,7 +91,7 @@ def process_file(
         # Chunk
         chunker_cls = get_chunker(chunking_strategy)
         chunker = chunker_cls()
-        chunks = chunker.chunk(pages, filename)
+        chunks = chunker.chunk(pages, blob_name)
 
         if not chunks:
             _log_audit(project_id, blob_name, "failed", 0, file_hash, "No chunks produced")
@@ -99,6 +100,13 @@ def process_file(
         # Embed
         texts = [c.content for c in chunks]
         embeddings = embed_texts(texts)
+
+        # Everything that can fail expensively (parse, chunk, embed) has now
+        # succeeded, so it is safe to drop the previous version's chunks.
+        # Deleting any earlier would erase the document from the index if a
+        # later step failed. Upload overwrites same-ID chunks anyway; this
+        # delete only clears stale IDs (e.g. pages removed in a new version).
+        remove_existing_chunks(index_name, blob_name)
 
         # Upload to index
         uploaded = upload_documents(index_name, chunks, embeddings, file_hash)

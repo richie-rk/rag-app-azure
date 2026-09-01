@@ -9,23 +9,42 @@ import logging
 
 import azure.durable_functions as df
 import azure.functions as func
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from services.shared.auth import extract_bearer_token, validate_jwt
+from services.shared.authz import user_can_access_project_id
+from services.shared.config import get_settings
+from services.shared.database import get_session_factory
+from services.shared.models import Project
 
 logger = logging.getLogger(__name__)
 
-app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+# ANONYMOUS at the platform level because the starter validates the caller's
+# JWT itself (same pattern as the utils Function App). Previously this was
+# AuthLevel.FUNCTION with no JWT check, which the browser could never call
+# (no function key) and which trusted index/container names from the body.
+app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 
 # Request schema
+#
+# The client identifies the project and nothing else. index_name,
+# container_name, blob_prefix, and chunking_strategy are all derived
+# server-side from the project row so a caller can never point ingestion
+# at another project's index or an arbitrary container (extra body fields
+# are ignored by pydantic's default config).
 
 
 class IngestionRequest(BaseModel):
-    project_name: str = Field(..., min_length=1)
-    index_name: str = Field(..., min_length=1)
-    container_name: str = Field(..., min_length=1)
     project_id: int
-    blob_prefix: str = ""
-    chunking_strategy: str = "page_wise"
+
+
+def _json_error(message: str, status_code: int) -> func.HttpResponse:
+    return func.HttpResponse(
+        json.dumps({"error": message}),
+        status_code=status_code,
+        mimetype="application/json",
+    )
 
 
 # Starter
@@ -35,23 +54,69 @@ class IngestionRequest(BaseModel):
 @app.durable_client_input(client_name="client")
 async def ingest_starter(req: func.HttpRequest, client: df.DurableOrchestrationClient):
     """HTTP trigger that starts the ingestion orchestration."""
+    # Authenticate: valid JWT, a platform role, and not a guest.
+    token = extract_bearer_token(req.headers.get("Authorization"))
+    if not token:
+        return _json_error("Missing authorization", 401)
+    try:
+        claims = validate_jwt(token)
+    except Exception:
+        return _json_error("Invalid token", 401)
+    if not claims.get("role"):
+        return _json_error("Not authorized", 403)
+    if claims.get("role") == "guest":
+        return _json_error("Read-only access for guest users", 403)
+
     try:
         body = req.get_json()
         request = IngestionRequest(**body)
     except Exception as exc:
-        return func.HttpResponse(
-            json.dumps({"error": f"Invalid request: {exc}"}),
-            status_code=400,
-            mimetype="application/json",
+        return _json_error(f"Invalid request: {exc}", 400)
+
+    # Authorize + resolve the project server-side.
+    factory = get_session_factory()
+    with factory() as session:
+        project = (
+            session.query(Project)
+            .filter(Project.id == request.project_id, Project.is_active.is_(True))
+            .first()
         )
+        if project is None:
+            return _json_error("Project not found", 404)
+        if claims.get("role") != "admin" and not user_can_access_project_id(
+            session, claims["sub"], project.id
+        ):
+            return _json_error("No access to this project", 403)
+
+        settings = get_settings()
+        orchestration_input = {
+            "project_name": project.name,
+            "index_name": project.index_name,
+            "container_name": settings.default_blob_container,
+            "project_id": project.id,
+            "blob_prefix": f"{project.id}/",
+            "chunking_strategy": project.chunking_strategy or "page_wise",
+        }
 
     instance_id = await client.start_new(
         "ingest_orchestrator",
-        client_input=request.model_dump(),
+        client_input=orchestration_input,
     )
 
-    logger.info("Started orchestration %s for project '%s'", instance_id, request.project_name)
-    return client.create_check_status_response(req, instance_id)
+    logger.info(
+        "Started orchestration %s for project '%s'",
+        instance_id,
+        orchestration_input["project_name"],
+    )
+    # NOT create_check_status_response: those management URLs embed the task
+    # hub's system key, which also authorizes terminate/raise-event calls
+    # against any orchestration instance. The UI only polls the audit table,
+    # so the instance id alone is returned.
+    return func.HttpResponse(
+        json.dumps({"instance_id": instance_id, "status": "started"}),
+        status_code=202,
+        mimetype="application/json",
+    )
 
 
 # Orchestrator
