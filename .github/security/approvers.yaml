@@ -1,0 +1,4 @@
+# The GitHub handles of the docchat-security team. A workflow token can't read organisation team
+# membership, so the security gate and the CodeQL dismissal check read the list from this file;
+# runbook R16 keeps it equal to the team.
+approvers: [richie-rk]

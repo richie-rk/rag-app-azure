@@ -1,0 +1,25 @@
+{
+  "version": "2.0",
+  "functionTimeout": "01:00:00",
+  "extensionBundle": { "id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[4.39.1, 5.0.0)" },
+  "extensions": {
+    "durableTask": {
+      "storageProvider": { "connectionName": "AzureWebJobsStorage", "partitionCount": 4 },
+      "maxConcurrentActivityFunctions": 2,
+      "maxConcurrentOrchestratorFunctions": 2,
+      "overridableExistingInstanceStates": "NonRunningStates",
+      "tracing": { "distributedTracingEnabled": false, "traceInputsAndOutputs": false, "traceReplayEvents": false }
+    },
+    "queues": {
+      "batchSize": 8, "newBatchThreshold": 4, "maxDequeueCount": 5,
+      "visibilityTimeout": "00:00:30", "maxPollingInterval": "00:00:05", "messageEncoding": "base64"
+    }
+  },
+  "logging": {
+    "logLevel": {
+      "default": "Warning", "Host.Results": "Information", "Host.Aggregator": "Information", "Function": "Warning",
+      "DurableTask.AzureStorage": "Warning", "DurableTask.Core": "Warning"
+    },
+    "applicationInsights": { "samplingSettings": { "isEnabled": false }, "enableDependencyTracking": false }
+  }
+}

@@ -1,0 +1,335 @@
+# The custom PSRule rules of 83-infrastructure.md section 13.3 (ADR 0106): the hardening settings no
+# built-in rule of PSRule for Azure checks.
+
+---
+# Synopsis: Selects App Service sites that host a function app.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Selector
+metadata:
+  name: DocChat.IsFunctionApp
+spec:
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Web/sites
+      - field: kind
+        contains: functionapp
+
+---
+# Synopsis: Selects model deployments and the Azure OpenAI accounts that hold them.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Selector
+metadata:
+  name: DocChat.ModelDeploymentScope
+spec:
+  if:
+    anyOf:
+      - type: '.'
+        equals: Microsoft.CognitiveServices/accounts/deployments
+      - allOf:
+          - type: '.'
+            equals: Microsoft.CognitiveServices/accounts
+          - field: kind
+            equals: OpenAI
+
+---
+# Synopsis: Every App Service site and its SCM endpoint accept TLS 1.3 only (ADR 0105).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.AppService.MinTLS13
+spec:
+  type:
+    - Microsoft.Web/sites
+  condition:
+    allOf:
+      - field: properties.siteConfig.minTlsVersion
+        equals: '1.3'
+      - field: properties.siteConfig.scmMinTlsVersion
+        equals: '1.3'
+
+---
+# Synopsis: Every App Service site refuses FTP and SCM basic-authentication publishing.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.AppService.NoBasicPublishing
+spec:
+  type:
+    - Microsoft.Web/sites
+  condition:
+    # A quantifier counts the items that match both the filter and its allOf, so each policy must
+    # exist exactly once and refuse publishing; a missing policy counts 0 and fails.
+    allOf:
+      - field: resources
+        where:
+          allOf:
+            - field: type
+              equals: Microsoft.Web/sites/basicPublishingCredentialsPolicies
+            - field: name
+              endsWith: /ftp
+        count: 1
+        allOf:
+          - field: properties.allow
+            equals: false
+      - field: resources
+        where:
+          allOf:
+            - field: type
+              equals: Microsoft.Web/sites/basicPublishingCredentialsPolicies
+            - field: name
+              endsWith: /scm
+        count: 1
+        allOf:
+          - field: properties.allow
+            equals: false
+
+---
+# Synopsis: Every App Service site's SCM endpoint denies all traffic.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.AppService.ScmDenied
+spec:
+  type:
+    - Microsoft.Web/sites
+  condition:
+    allOf:
+      - field: properties.siteConfig.scmIpSecurityRestrictionsDefaultAction
+        equals: Deny
+      - anyOf:
+          - field: properties.siteConfig.scmIpSecurityRestrictions
+            exists: false
+          - field: properties.siteConfig.scmIpSecurityRestrictions
+            count: 0
+      - field: properties.siteConfig.scmIpSecurityRestrictionsUseMain
+        notEquals: true
+
+---
+# Synopsis: Every function app has public network access disabled.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.Functions.PublicAccessDisabled
+spec:
+  with:
+    - DocChat.IsFunctionApp
+  condition:
+    field: properties.publicNetworkAccess
+    equals: Disabled
+
+---
+# Synopsis: Every SQL server requires TLS 1.3 (ADR 0105).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.SQL.MinTLS13
+spec:
+  type:
+    - Microsoft.Sql/servers
+  condition:
+    field: properties.minimalTlsVersion
+    equals: '1.3'
+
+---
+# Synopsis: Selects DocChat's SQL servers, where Azure.SQL.Auditing is suppressed.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Selector
+metadata:
+  name: DocChat.IsDocChatSqlServer
+spec:
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Sql/servers
+      - name: '.'
+        like: 'sql-docchat-*'
+
+---
+# Synopsis: Every DocChat SQL server keeps its privileged audit enabled, sent to Azure Monitor and limited by a predicate (ADR 0108).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.SQL.Auditing
+spec:
+  with:
+    - DocChat.IsDocChatSqlServer
+  condition:
+    # The built-in Azure.SQL.Auditing reads only servers/auditingSettings; the privileged audit is
+    # the extendedAuditingSettings of 83-infrastructure.md section 2.9, which PSRule for Azure
+    # nests under its server's `resources`. A quantifier counts the items that match both the
+    # filter and its allOf, so the first condition finds exactly one setting named `default` (a
+    # missing one counts 0 and fails), and the second requires every setting of that type to be
+    # that one: enabled, sent to Azure Monitor and limited by a predicate.
+    allOf:
+      - field: resources
+        where:
+          field: type
+          equals: Microsoft.Sql/servers/extendedAuditingSettings
+        count: 1
+        allOf:
+          - field: name
+            endsWith: /default
+      - field: resources
+        where:
+          field: type
+          equals: Microsoft.Sql/servers/extendedAuditingSettings
+        allOf:
+          - field: name
+            endsWith: /default
+          - field: properties.state
+            equals: Enabled
+          - field: properties.isAzureMonitorTargetEnabled
+            equals: true
+          - field: properties.predicateExpression
+            hasValue: true
+
+---
+# Synopsis: Every AI Search service accepts role-based access only.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.Search.LocalAuthDisabled
+spec:
+  type:
+    - Microsoft.Search/searchServices
+  condition:
+    field: properties.disableLocalAuth
+    equals: true
+
+---
+# Synopsis: Every Azure AI services account has a custom subdomain, which Entra authentication needs.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.AI.CustomSubdomain
+spec:
+  type:
+    - Microsoft.CognitiveServices/accounts
+  condition:
+    field: properties.customSubDomainName
+    hasValue: true
+
+---
+# Synopsis: Every Azure AI services account makes no outbound call.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.AI.RestrictOutbound
+spec:
+  type:
+    - Microsoft.CognitiveServices/accounts
+  condition:
+    allOf:
+      - field: properties.restrictOutboundNetworkAccess
+        equals: true
+      - anyOf:
+          - field: properties.allowedFqdnList
+            exists: false
+          - field: properties.allowedFqdnList
+            count: 0
+
+---
+# Synopsis: Every Log Analytics workspace accepts Entra authentication only.
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.LogAnalytics.LocalAuthDisabled
+spec:
+  type:
+    - Microsoft.OperationalInsights/workspaces
+  condition:
+    field: properties.features.disableLocalAuth
+    equals: true
+
+---
+# Synopsis: No resource admits trusted Azure services past its network rules (ADR 0098).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.Network.NoTrustedServiceBypass
+spec:
+  type:
+    - Microsoft.Storage/storageAccounts
+    - Microsoft.KeyVault/vaults
+    - Microsoft.Search/searchServices
+    - Microsoft.CognitiveServices/accounts
+    - Microsoft.DocumentDB/databaseAccounts
+    - Microsoft.ContainerRegistry/registries
+  condition:
+    anyOf:
+      - allOf:
+          - type: '.'
+            in:
+              - Microsoft.Storage/storageAccounts
+              - Microsoft.KeyVault/vaults
+              - Microsoft.CognitiveServices/accounts
+          - field: properties.networkAcls.bypass
+            equals: None
+      - allOf:
+          - type: '.'
+            equals: Microsoft.Search/searchServices
+          - field: properties.networkRuleSet.bypass
+            equals: None
+      - allOf:
+          - type: '.'
+            equals: Microsoft.DocumentDB/databaseAccounts
+          - field: properties.networkAclBypass
+            equals: None
+      - allOf:
+          - type: '.'
+            equals: Microsoft.ContainerRegistry/registries
+          - field: properties.networkRuleBypassOptions
+            equals: None
+
+---
+# Synopsis: Chat model deployments name a content filter policy; embedding deployments name none and never upgrade in place (ADRs 0066 and 0067).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: Rule
+metadata:
+  name: DocChat.OpenAI.DeploymentRules
+spec:
+  with:
+    - DocChat.ModelDeploymentScope
+  condition:
+    # PSRule for Azure nests a deployment under its account's `resources`, so the rule reads it
+    # there; a deployment that ever arrives on its own is judged directly. An Azure OpenAI account
+    # without a deployment fails: DocChat's account always holds its default deployments.
+    anyOf:
+      - allOf:
+          - type: '.'
+            equals: Microsoft.CognitiveServices/accounts/deployments
+          - anyOf:
+              - allOf:
+                  - field: properties.model.name
+                    notStartsWith: text-embedding
+                  - field: properties.raiPolicyName
+                    hasValue: true
+              - allOf:
+                  - field: properties.model.name
+                    startsWith: text-embedding
+                  - field: properties.versionUpgradeOption
+                    equals: NoAutoUpgrade
+                  - field: properties.raiPolicyName
+                    hasValue: false
+      - allOf:
+          - type: '.'
+            equals: Microsoft.CognitiveServices/accounts
+          - field: resources
+            where:
+              field: type
+              equals: Microsoft.CognitiveServices/accounts/deployments
+            allOf:
+              - anyOf:
+                  - allOf:
+                      - field: properties.model.name
+                        notStartsWith: text-embedding
+                      - field: properties.raiPolicyName
+                        hasValue: true
+                  - allOf:
+                      - field: properties.model.name
+                        startsWith: text-embedding
+                      - field: properties.versionUpgradeOption
+                        equals: NoAutoUpgrade
+                      - field: properties.raiPolicyName
+                        hasValue: false

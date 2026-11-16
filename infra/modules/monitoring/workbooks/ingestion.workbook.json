@@ -1,0 +1,228 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "5b8e2c41-7f3a-4d9e-b1c6-0a2f4e6d8c13",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"ingestion_run_finished\" | summarize runs = count() by state = tostring(Properties[\"state\"]), bin(TimeGenerated, 1d)",
+        "size": 0,
+        "title": "Runs by final state per day",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "runs-by-state"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ingestion.items.completed\" | summarize items = sum(Sum) by operation = tostring(Properties[\"operation\"]), state = tostring(Properties[\"state\"]), outcomeCode = tostring(Properties[\"outcome_code\"]) | order by items desc",
+        "size": 0,
+        "title": "Item outcomes by code",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "item-outcomes"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.ingestion.queue.oldest_age\", \"docchat.ingestion.items.queued\", \"docchat.ingestion.items.running\") | summarize value = max(Sum) by Name, priority = tostring(Properties[\"priority\"]), bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Queue age, queued and running items",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "queue-age"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.ingestion.dispatcher.heartbeat_age\", \"docchat.ingestion.poison_queue.length\") | summarize value = max(Sum) by Name, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Dispatcher heartbeat age and poison messages",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "dispatcher-heartbeat"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.ingestion.stage.duration\", \"docchat.ingestion.item.duration\") | summarize meanS = sum(Sum) / sum(ItemCount), maxS = max(Max), n = sum(ItemCount) by Name, stage = coalesce(tostring(Properties[\"stage\"]), tostring(Properties[\"operation\"])), methodKey = tostring(Properties[\"method_key\"])",
+        "size": 0,
+        "title": "Stage and item duration",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "stage-item-duration"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"ingestion_item_failed\" | project TimeGenerated, runId = tostring(Properties[\"runId\"]), itemId = tostring(Properties[\"itemId\"]), operation = tostring(Properties[\"operation\"]), stage = tostring(Properties[\"stage\"]), outcomeCode = tostring(Properties[\"outcomeCode\"]) | top 50 by TimeGenerated desc",
+        "size": 0,
+        "title": "Latest failed items",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "latest-failed-items"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "union (AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ingestion.scan.results\" | summarize n = sum(Sum) by item = strcat(\"scan:\", tostring(Properties[\"result\"]))), (AppEvents | where TimeGenerated {TimeRange} and Name == \"scanner_canary_result\" | summarize n = todouble(count()), lastAt = max(TimeGenerated) by item = strcat(\"canary:\", tostring(Properties[\"result\"])))",
+        "size": 0,
+        "title": "Scan results and the scanner canary",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "scan-results"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.uploads.completed\" | summarize uploads = sum(Sum) by outcome = tostring(Properties[\"outcome\"]), errorCode = tostring(Properties[\"error_code\"])",
+        "size": 0,
+        "title": "Uploads by outcome",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "uploads-by-outcome"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name in (\"ingestion_dispatcher_restarted\", \"index_repointed\", \"physical_index_deleted\", \"ingestion_queue_send_failed\", \"ingestion_message_invalid\") | summarize n = count(), lastAt = max(TimeGenerated) by Name",
+        "size": 0,
+        "title": "Dispatcher restarts, repoints, deleted physical indexes and message problems",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "dispatcher-events"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.ingestion.convert.duration\", \"docchat.ingestion.convert.pages\") | summarize mean = sum(Sum) / sum(ItemCount), maxValue = max(Max), n = sum(ItemCount) by Name, contentType = tostring(Properties[\"content_type\"]), outcome = tostring(Properties[\"outcome\"])",
+        "size": 0,
+        "title": "Office conversions",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "office-conversions"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

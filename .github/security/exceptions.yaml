@@ -1,0 +1,37 @@
+# The exceptions at high severity (84-testing.md section 9.3). The security gate accepts an entry
+# here only for the pairs fixed in scripts/ci/security_gate.py, so no other check, finding, image
+# or report can be excepted by editing this file:
+# - DS002 on the ingestion image (ADR 0153): Trivy's Dockerfile check "Image user should not be
+#   'root'"; review_by at most 184 days after added.
+# - unfixed-os-packages on the api, ingestion or model-stub image (ADR 0154), one entry per image:
+#   a HIGH or CRITICAL vulnerability of an OS package (Trivy result class os-pkgs) in that image's
+#   own report for which the report gives no fixed version; review_by at most 90 days after added.
+# Each entry has exactly id, image, reason (at least 20 characters), decision (the ADR that records
+# the product owner's decision, written "ADR NNNN"), added and review_by (dates written
+# YYYY-MM-DD; added not after today). Once review_by has passed the gate fails until
+# docchat-security reviews the exception and renews it with new dates, or removes it.
+exceptions:
+  - id: DS002
+    image: ingestion
+    reason: "The Functions host and worker keep the base image's UID 0 because the parsing child's user switch needs it; every parse runs as a pool user (UIDs 10002 to 10017) under the system-call filter, never as root (14-ingestion.md section 15.6, ADR 0049)."
+    decision: ADR 0153
+    added: 2026-11-06
+    review_by: 2027-05-06
+  - id: unfixed-os-packages
+    image: api
+    reason: "Debian 13 publishes no fixed version yet for these HIGH or CRITICAL findings in the python:3.13 slim-trixie base's packages; the runtime stage takes every Debian fix that exists, and each finding fails again once its report names a fix (ADR 0154)."
+    decision: ADR 0154
+    added: 2026-11-07
+    review_by: 2027-02-05
+  - id: unfixed-os-packages
+    image: ingestion
+    reason: "Debian 12 publishes no fixed version yet for these HIGH or CRITICAL findings in the Functions base image's packages and the converter's; the runtime stage takes every Debian fix that exists, and each finding fails again once its report names a fix (ADR 0154)."
+    decision: ADR 0154
+    added: 2026-11-07
+    review_by: 2027-02-05
+  - id: unfixed-os-packages
+    image: model-stub
+    reason: "Debian 13 publishes no fixed version yet for these HIGH or CRITICAL findings in the python:3.13 slim-trixie base's packages; the runtime stage takes every Debian fix that exists, and each finding fails again once its report names a fix (ADR 0154)."
+    decision: ADR 0154
+    added: 2026-11-07
+    review_by: 2027-02-05

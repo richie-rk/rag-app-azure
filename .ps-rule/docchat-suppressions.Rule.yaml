@@ -1,0 +1,363 @@
+# The suppression groups of 83-infrastructure.md section 13.4 (ADR 0106). Each expires on
+# 2027-10-31, and an expired suppression fails the PSRule run (execution.suppressionGroupExpired).
+# PSRule reads only the first line of a comment as the synopsis it prints beside every suppressed
+# result, so each `# Synopsis:` keeps its whole reason on that one line. `type` and `name` resolve
+# through the binding in ps-rule.yaml (the resource's type and name).
+
+---
+# Synopsis: Malware scanning is a prod-on parameter of the data account only, and the Functions host account holds no uploads (ADR 0117).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.StorageMalwareScan
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Storage.Defender.MalwareScan
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Storage/storageAccounts
+      - name: '.'
+        like:
+          - 'stdocchathost*'
+          - 'stdocchatdatadev*'
+          - 'stdocchatdataload*'
+
+---
+# Synopsis: dev's data account is locally redundant because dev holds test data (ADR 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.DevStorageReplication
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Storage.UseReplication
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Storage/storageAccounts
+      - name: '.'
+        like: 'stdocchatdatadev*'
+
+---
+# Synopsis: dev's B1 API plan is a development SKU with one instance (ADR 0095).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.DevApiPlan
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.AppService.MinPlan
+    - Azure.AppService.PlanInstanceCount
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Web/serverfarms
+      - name: '.'
+        equals: asp-docchat-api-dev
+
+---
+# Synopsis: The single-instance load scenario starts load's API plan at one instance, and the model stub runs one instance (ADR 0112).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.LoadPlanInstances
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.AppService.PlanInstanceCount
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Web/serverfarms
+      - name: '.'
+        in:
+          - asp-docchat-api-load
+          - asp-docchat-stub-load
+
+---
+# Synopsis: API zone redundancy is a prod parameter, off by default; ingestion work resumes from SQL and Durable checkpoints after a zone loss; the stub exists only for load runs (ADR 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.PlanAvailabilityZones
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.AppService.AvailabilityZone
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Web/serverfarms
+      - name: '.'
+        like:
+          - 'asp-docchat-api-*'
+          - 'asp-docchat-ingest-*'
+          - 'asp-docchat-stub-load'
+
+---
+# Synopsis: Two replicas meet the query SLA; the read-write SLA's three replicas is a cost the product doesn't take (ADR 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.SearchIndexSla
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Search.IndexSLA
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Search/searchServices
+      - name: '.'
+        like:
+          - 'srch-docchat-prod-*'
+          - 'srch-docchat-load-*'
+
+---
+# Synopsis: dev's search service runs Basic with one replica and no zone redundancy, so it carries neither search SLA (ADR 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.DevSearchReplicas
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Search.QuerySLA
+    - Azure.Search.IndexSLA
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Search/searchServices
+      - name: '.'
+        like: 'srch-docchat-dev-*'
+
+---
+# Synopsis: dev's serverless Cosmos DB account isn't zone-redundant; dev holds test data and stays single-zone (ADR 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.DevCosmosZones
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Cosmos.AvailabilityZone
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.DocumentDB/databaseAccounts
+      - name: '.'
+        like: 'cosmos-docchat-dev-*'
+
+---
+# Synopsis: Non-production vaults are emptied and re-created, so purge protection stays off there (ADR 0095).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.NonProductionVaultPurge
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.KeyVault.PurgeProtect
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.KeyVault/vaults
+      - name: '.'
+        like:
+          - 'kv-docchat-dev-*'
+          - 'kv-docchat-load-*'
+
+---
+# Synopsis: The search service makes no outbound connection: no indexer, skillset, vectorizer or customer-managed key (ADR 0044).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.SearchIdentity
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Search.ManagedIdentity
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Search/searchServices
+      - name: '.'
+        like: 'srch-docchat-*'
+
+---
+# Synopsis: Microsoft Defender for SQL isn't part of the first version: Entra-only authentication, bound parameters, the private endpoint and allowlist and the privileged SQL audit with its alerts cover what it watches (ADRs 0108 and 0115).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.SqlDefender
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.SQL.DefenderCloud
+    - Azure.SQL.VAScan
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Sql/servers
+      - name: '.'
+        like: 'sql-docchat-*'
+
+---
+# Synopsis: The rule reads only servers/auditingSettings, while the privileged audit is the extendedAuditingSettings whose predicate keeps the workload identities out, checked by DocChat.SQL.Auditing (ADR 0108).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.SqlAuditing
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.SQL.Auditing
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Sql/servers
+      - name: '.'
+        like: 'sql-docchat-*'
+
+---
+# Synopsis: The default maintenance policy applies; a planned-maintenance reconfiguration reaches the apps as a transient error that the SQL data-access layer retries (ADR 0026).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.SqlMaintenanceWindow
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.SQL.MaintenanceWindow
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Sql/servers/databases
+      - name: '.'
+        like: 'sql-docchat-*/docchat'
+
+---
+# Synopsis: resourceTokenSalt, resourceToken and sharedToken are the public naming inputs every resource name shows, and the Azure Verified Modules' keys parameters declare key properties, never key material (ADRs 0095 and 0097).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.NamingInputsAsSecrets
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Deployment.SecureParameter
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Resources/deployments
+      - name: '.'
+        like:
+          # main.bicepparam's own deployment (resourceTokenSalt), named by its file path.
+          - '*/infra/main.bicepparam'
+          # The local modules that take resourceToken or sharedToken to build their names.
+          - 'api'
+          - 'content-safety'
+          - 'cosmos'
+          - 'document-intelligence'
+          - 'entra-apps'
+          - 'ingestion'
+          - 'key-vault'
+          - 'model-stub'
+          - 'openai'
+          - 'search'
+          - 'shared-registry'
+          - 'sql'
+          - 'storage-data'
+          - 'storage-host'
+          # The AVM key-vault and SQL server deployments (their keys parameter).
+          - 'kv-docchat-*'
+          - 'sql-docchat-*'
+
+---
+# Synopsis: The registry's public endpoint stays on for the dev publish jobs' transient runner rule, and exports can't be disabled while it is on (ADRs 0118 and 0119).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.RegistryExport
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.ACR.ExportPolicy
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.ContainerRegistry/registries
+      - name: '.'
+        like: 'crdocchat*'
+
+---
+# Synopsis: Each environment runs in one region and the registry's resilience is zone redundancy there; a geo-replica is a monthly cost the product doesn't take (ADRs 0101 and 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.RegistryGeoReplica
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.ACR.GeoReplica
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.ContainerRegistry/registries
+      - name: '.'
+        like: 'crdocchat*'
+
+---
+# Synopsis: Each environment runs in one region with zone-level resilience; workspace replication to a second region is a per-GB cost the product doesn't take (ADRs 0101 and 0102).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.WorkspaceReplication
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Log.Replication
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.OperationalInsights/workspaces
+      - name: '.'
+        like: 'log-docchat-*'
+
+---
+# Synopsis: A03 api-5xx-high is the severity-1 rule the alert catalogue evaluates every minute over a five-minute window (ADR 0138).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.ApiErrorAlertFrequency
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.Alert.HighFrequencyQuery
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Insights/scheduledQueryRules
+      - name: '.'
+        like: 'docchat-*-api-5xx-high'
+
+---
+# Synopsis: The ingestion function app takes no inbound traffic (public access disabled, no HTTP trigger) and keeps http20Enabled false (ADR 0005).
+apiVersion: github.com/microsoft/PSRule/v1
+kind: SuppressionGroup
+metadata:
+  name: DocChat.Suppress.IngestionHttp2
+spec:
+  expiresOn: '2027-10-31T00:00:00Z'
+  rule:
+    - Azure.AppService.HTTP2
+  if:
+    allOf:
+      - type: '.'
+        equals: Microsoft.Web/sites
+      - name: '.'
+        like: 'func-docchat-ingest-*'

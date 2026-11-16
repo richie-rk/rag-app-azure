@@ -1,0 +1,74 @@
+{
+  "linuxPremiumMaxInstances": {
+    "regions": {
+      "eastus": 100,
+      "eastus2": 100,
+      "centralus": 100,
+      "southcentralus": 100,
+      "westus": 100,
+      "canadacentral": 100,
+      "northeurope": 100,
+      "westeurope": 100,
+      "uksouth": 100,
+      "uaenorth": 100,
+      "francecentral": 60,
+      "australiaeast": 40
+    },
+    "otherRegions": 20,
+    "absent": ["australiacentral2", "southindia"]
+  },
+  "promptShieldsRegions": [
+    "canadaeast",
+    "centralus",
+    "eastus",
+    "eastus2",
+    "northcentralus",
+    "southcentralus",
+    "westus2",
+    "westus3",
+    "francecentral",
+    "polandcentral",
+    "switzerlandnorth",
+    "westeurope",
+    "australiaeast",
+    "japaneast",
+    "koreacentral",
+    "southeastasia",
+    "southindia"
+  ],
+  "semanticRankerRegions": [],
+  "documentIntelligenceLayoutRegions": [],
+  "githubPrivateNetworkingRegions": [
+    "australiaeast",
+    "brazilsouth",
+    "canadacentral",
+    "canadaeast",
+    "centralus",
+    "eastasia",
+    "eastus",
+    "eastus2",
+    "francecentral",
+    "japanwest",
+    "koreacentral",
+    "northcentralus",
+    "norwayeast",
+    "southcentralus",
+    "southeastasia",
+    "southindia",
+    "swedencentral",
+    "switzerlandnorth",
+    "uksouth",
+    "ukwest",
+    "westus",
+    "westus2",
+    "westus3"
+  ],
+  "sources": {
+    "semanticRankerRegions": {
+      "msDate": null
+    },
+    "documentIntelligenceLayoutRegions": {
+      "msDate": null
+    }
+  }
+}

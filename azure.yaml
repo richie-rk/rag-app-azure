@@ -1,0 +1,37 @@
+name: docchat
+requiredVersions:
+  azd: ">= 1.35.1"
+infra:
+  provider: bicep
+  path: infra
+  module: main
+hooks:
+  preprovision:
+    posix:   { shell: sh,   run: "uv run --frozen python scripts/deploy/hooks/preprovision.py" }
+    windows: { shell: pwsh, run: "uv run --frozen python scripts/deploy/hooks/preprovision.py" }
+  postprovision:
+    posix:   { shell: sh,   run: "uv run --frozen python scripts/deploy/hooks/postprovision.py" }
+    windows: { shell: pwsh, run: "uv run --frozen python scripts/deploy/hooks/postprovision.py" }
+  postdeploy:
+    posix:   { shell: sh,   run: "uv run --frozen python scripts/deploy/hooks/postdeploy.py" }
+    windows: { shell: pwsh, run: "uv run --frozen python scripts/deploy/hooks/postdeploy.py" }
+services:
+  web:
+    project: apps/web
+    language: ts
+    host: staticwebapp
+    dist: dist
+    hooks:
+      predeploy:
+        posix:   { shell: sh,   run: "uv run --frozen python scripts/deploy/hooks/web_predeploy.py" }
+        windows: { shell: pwsh, run: "uv run --frozen python scripts/deploy/hooks/web_predeploy.py" }
+  api:
+    host: appservice
+    image: ${DOCCHAT_API_IMAGE}
+    docker:
+      imagePassthrough: true
+  ingestion:
+    host: function
+    image: ${DOCCHAT_INGESTION_IMAGE}
+    docker:
+      imagePassthrough: true

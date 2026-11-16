@@ -1,0 +1,205 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "path": "/indexes('contract-index')/docs/search.index",
+      "query": {
+        "api-version": "2026-04-01"
+      },
+      "json": {
+        "value": [
+          {
+            "@search.action": "upload",
+            "id": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_0",
+            "documentId": "1d000000-0000-4000-8000-000000000001",
+            "documentVersionId": "2e000000-0000-4000-8000-000000000001",
+            "chunkSetId": "3f000000-0000-4000-8000-000000000001",
+            "chunkOrdinal": 0,
+            "title": "Travel policy",
+            "headingPath": [
+              "Claims"
+            ],
+            "pageNumber": 1,
+            "contentType": "application/pdf",
+            "chunkText": "Claims are filed within 30 days."
+          },
+          {
+            "@search.action": "upload",
+            "id": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_1",
+            "documentId": "1d000000-0000-4000-8000-000000000001",
+            "documentVersionId": "2e000000-0000-4000-8000-000000000001",
+            "chunkSetId": "3f000000-0000-4000-8000-000000000001",
+            "chunkOrdinal": 1,
+            "title": "Travel policy",
+            "headingPath": [
+              "Claims"
+            ],
+            "pageNumber": 2,
+            "contentType": "application/pdf",
+            "chunkText": "Receipts are required above 25 euros."
+          },
+          {
+            "@search.action": "upload",
+            "id": "1d000000-0000-4000-8000-000000000002_3f000000-0000-4000-8000-000000000002_0",
+            "documentId": "1d000000-0000-4000-8000-000000000002",
+            "documentVersionId": "2e000000-0000-4000-8000-000000000002",
+            "chunkSetId": "3f000000-0000-4000-8000-000000000002",
+            "chunkOrdinal": 0,
+            "title": "Travel policy",
+            "headingPath": [
+              "Claims"
+            ],
+            "pageNumber": 1,
+            "contentType": "application/pdf",
+            "chunkText": "Mileage is paid at the published rate."
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "json": {
+        "value": [
+          {
+            "key": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_0",
+            "status": true,
+            "errorMessage": null,
+            "statusCode": 201
+          },
+          {
+            "key": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_1",
+            "status": true,
+            "errorMessage": null,
+            "statusCode": 201
+          },
+          {
+            "key": "1d000000-0000-4000-8000-000000000002_3f000000-0000-4000-8000-000000000002_0",
+            "status": true,
+            "errorMessage": null,
+            "statusCode": 201
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "POST",
+      "path": "/indexes('contract-index')/docs/search.post.search",
+      "query": {
+        "api-version": "2026-04-01"
+      },
+      "json": {
+        "search": "*",
+        "filter": "search.in(documentId, '1d000000-0000-4000-8000-000000000001', ',')",
+        "top": 50
+      }
+    },
+    "response": {
+      "status": 200,
+      "json": {
+        "value": [
+          {
+            "@search.score": 1.0,
+            "@search.rerankerScore": 3.12,
+            "id": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_0",
+            "documentId": "1d000000-0000-4000-8000-000000000001",
+            "documentVersionId": "2e000000-0000-4000-8000-000000000001",
+            "chunkSetId": "3f000000-0000-4000-8000-000000000001",
+            "chunkOrdinal": 0,
+            "title": "Travel policy",
+            "headingPath": [
+              "Claims"
+            ],
+            "pageNumber": 1,
+            "contentType": "application/pdf",
+            "chunkText": "Claims are filed within 30 days."
+          },
+          {
+            "@search.score": 1.0,
+            "@search.rerankerScore": 2.47,
+            "id": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_1",
+            "documentId": "1d000000-0000-4000-8000-000000000001",
+            "documentVersionId": "2e000000-0000-4000-8000-000000000001",
+            "chunkSetId": "3f000000-0000-4000-8000-000000000001",
+            "chunkOrdinal": 1,
+            "title": "Travel policy",
+            "headingPath": [
+              "Claims"
+            ],
+            "pageNumber": 2,
+            "contentType": "application/pdf",
+            "chunkText": "Receipts are required above 25 euros."
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "POST",
+      "path": "/indexes('contract-index')/docs/search.index",
+      "query": {
+        "api-version": "2026-04-01"
+      },
+      "json": {
+        "value": [
+          {
+            "@search.action": "delete",
+            "id": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_0"
+          }
+        ]
+      }
+    },
+    "response": {
+      "status": 200,
+      "json": {
+        "value": [
+          {
+            "key": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_0",
+            "status": true,
+            "errorMessage": null,
+            "statusCode": 200
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "POST",
+      "path": "/indexes('contract-index')/docs/search.post.search",
+      "query": {
+        "api-version": "2026-04-01"
+      },
+      "json": {
+        "search": "*",
+        "filter": "search.in(documentId, '1d000000-0000-4000-8000-000000000001', ',')",
+        "top": 50
+      }
+    },
+    "response": {
+      "status": 200,
+      "json": {
+        "value": [
+          {
+            "@search.score": 1.0,
+            "@search.rerankerScore": 2.47,
+            "id": "1d000000-0000-4000-8000-000000000001_3f000000-0000-4000-8000-000000000001_1",
+            "documentId": "1d000000-0000-4000-8000-000000000001",
+            "documentVersionId": "2e000000-0000-4000-8000-000000000001",
+            "chunkSetId": "3f000000-0000-4000-8000-000000000001",
+            "chunkOrdinal": 1,
+            "title": "Travel policy",
+            "headingPath": [
+              "Claims"
+            ],
+            "pageNumber": 2,
+            "contentType": "application/pdf",
+            "chunkText": "Receipts are required above 25 euros."
+          }
+        ]
+      }
+    }
+  }
+]

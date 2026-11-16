@@ -1,0 +1,1325 @@
+name: load-test
+
+# The load test (84-testing.md section 7; ADRs 0126, 0134, 0135 and 0151): a short-lived load
+# environment with production SKUs and the model stub, created for one run of a release that a
+# successful deploy.yaml run on main built and verified, measured by scenarios S1 to S4 and the
+# alert probe, and torn down at the end. The runbook "Run the load test" is the operator's
+# procedure. Jobs that hold test tokens run in load-tests as id-docchat-citest; jobs that need the
+# load deploy identity run in load and hold no test token; they pass each other only non-secret
+# outputs.
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_run_id:
+        description: "The deploy.yaml run whose release-manifest and digests to test"
+        type: string
+        required: true
+      scenarios:
+        description: "all, or a comma list of s1, s2, s3, s4"
+        type: string
+        required: true
+        default: all
+      rate:
+        description: "S3's main rate in turns per second, replacing the CPU-derived rate (optional)"
+        type: string
+        required: false
+        default: ""
+      answer_tokens:
+        description: "S3's answer length L in tokens, 80 to 4000"
+        type: number
+        required: true
+        default: 80
+
+permissions: {}
+
+concurrency:
+  group: docchat-load-test
+  cancel-in-progress: false
+
+jobs:
+  # 0. Only a release that deploy.yaml built, scanned and attested on main is tested (T-533).
+  manifest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      api_image: ${{ steps.release.outputs.api_image }}
+      ingestion_image: ${{ steps.release.outputs.ingestion_image }}
+      model_stub_image: ${{ steps.release.outputs.model_stub_image }}
+      run_s1: ${{ steps.inputs.outputs.run_s1 }}
+      run_s2: ${{ steps.inputs.outputs.run_s2 }}
+      run_s3: ${{ steps.inputs.outputs.run_s3 }}
+      run_s4: ${{ steps.inputs.outputs.run_s4 }}
+      rate: ${{ steps.inputs.outputs.rate }}
+      answer_tokens: ${{ steps.inputs.outputs.answer_tokens }}
+      token_delay_ms: ${{ steps.inputs.outputs.token_delay_ms }}
+    steps:
+      - name: Check the inputs
+        id: inputs
+        env:
+          DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          RATE: ${{ inputs.rate }}
+          ANSWER_TOKENS: ${{ inputs.answer_tokens }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$DEPLOY_RUN_ID" | grep -Eq '^[0-9]+$'; then
+            echo "::error::deploy_run_id isn't a workflow run ID"; exit 1
+          fi
+          selected=""
+          if [ "$SCENARIOS" = "all" ]; then
+            selected="s1 s2 s3 s4"
+          else
+            for scenario in $(printf '%s' "$SCENARIOS" | tr ',' ' '); do
+              case "$scenario" in
+                s1|s2|s3|s4) selected="$selected $scenario" ;;
+                *) echo "::error::unknown scenario ${scenario}"; exit 1 ;;
+              esac
+            done
+          fi
+          if [ -z "$selected" ]; then
+            echo "::error::no scenario selected"; exit 1
+          fi
+          if [ -n "$RATE" ] && ! printf '%s' "$RATE" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::rate isn't a positive integer"; exit 1
+          fi
+          if ! printf '%s' "$ANSWER_TOKENS" | grep -Eq '^[0-9]+$' || [ "$ANSWER_TOKENS" -lt 80 ] || [ "$ANSWER_TOKENS" -gt 4000 ]; then
+            echo "::error::answer_tokens runs from 80 to 4000"; exit 1
+          fi
+          # d = max(1, floor(800 / L)) ms, so each answer streams for about 800 ms.
+          delay=$(( 800 / ANSWER_TOKENS ))
+          if [ "$delay" -lt 1 ]; then delay=1; fi
+          {
+            for scenario in s1 s2 s3 s4; do
+              case " $selected " in
+                *" $scenario "*) echo "run_${scenario}=true" ;;
+                *) echo "run_${scenario}=false" ;;
+              esac
+            done
+            echo "rate=${RATE}"
+            echo "answer_tokens=${ANSWER_TOKENS}"
+            echo "token_delay_ms=${delay}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Check the deploy run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_RUN_ID: ${{ inputs.deploy_run_id }}
+        run: uv run --no-project --python 3.13 python scripts/ci/check_deploy_run.py "$DEPLOY_RUN_ID"
+
+      - name: Download the release manifest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/release
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.deploy_run_id }}
+
+      - name: Publish the release
+        id: release
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release/release-manifest.json"
+          commit="$(jq -r '.commit' "$manifest")"
+          if ! printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the release manifest's commit isn't 40 hexadecimal characters"; exit 1
+          fi
+          {
+            echo "commit=${commit}"
+            for pair in api_image:apiImage ingestion_image:ingestionImage model_stub_image:modelStubImage; do
+              key="${pair%%:*}"
+              reference="$(jq -r --arg field "${pair##*:}" '.[$field]' "$manifest")"
+              if ! printf '%s' "$reference" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/docchat/[a-z-]+@sha256:[0-9a-f]{64}$'; then
+                echo "::error::the release manifest's ${pair##*:} isn't a digest reference" >&2; exit 1
+              fi
+              echo "${key}=${reference}"
+            done
+          } >> "$GITHUB_OUTPUT"
+
+  # 1. Provisions and deploys the release with names new to this run (83-infrastructure.md
+  # section 10.14); the called job tags rg-docchat-load before it provisions anything.
+  create:
+    needs: manifest
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    uses: ./.github/workflows/deploy-environment.yaml
+    with:
+      environment: load
+      api_image: ${{ needs.manifest.outputs.api_image }}
+      ingestion_image: ${{ needs.manifest.outputs.ingestion_image }}
+      model_stub_image: ${{ needs.manifest.outputs.model_stub_image }}
+      web_artifact_run_id: ${{ inputs.deploy_run_id }}
+      mode: full
+      resource_token_salt: run-${{ github.run_id }}
+
+  # 2. A docchat-tenant-admins reviewer completes the gate steps of the runbook "Run the load test"
+  # (the post-provision identity step for the run's registrations, the Conditional Access
+  # exclusion, testusers check --set load --min-hours 24) before approving.
+  access-gate:
+    needs: create
+    environment: load-access
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Record the approval
+        env:
+          API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+          TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+        run: |
+          {
+            echo "## Load access gate approved"
+            echo ""
+            echo "API: ${API_BASE_URL}; test client: ${TEST_CLIENT_ID}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 3. The load ops config of 84-testing.md section 7.3, as the load deploy identity.
+  seed-config:
+    needs: [manifest, access-gate]
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      applied_at: ${{ steps.config.outputs.applied_at }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      TICKET: ${{ github.run_id }}
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.manifest.outputs.commit }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the operator CLI from the lockfile
+        run: uv sync --locked --package docchat-ops
+
+      - name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Sign in to Azure as the load deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Read the environment's outputs
+        run: |
+          azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new load --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP rg-docchat-load
+          azd env refresh -e load --no-prompt
+
+      - name: Open the SQL runner rule
+        id: open
+        run: |
+          uv run --frozen python scripts/deploy/firewall.py sweep --target sql --env load
+          uv run --frozen python scripts/deploy/firewall.py open --target sql --env load
+
+      - name: Set the load ops config
+        id: config
+        run: |
+          set -euo pipefail
+          set_value() {
+            uv run --no-sync docchat-ops --env load config set --key "$1" --value "$2" \
+              --ticket "$TICKET" --reason "load test configuration of the run" --yes
+          }
+          set_value ratelimit.max_concurrent_streams 200
+          set_value ratelimit.chat_requests_per_minute 1200
+          set_value quota.tokens_per_day 1000000000
+          set_value quota.tokens_per_month 100000000000
+          set_value chat.max_turn_seconds 220
+          echo "applied_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Close the SQL runner rule
+        if: ${{ always() && steps.open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target sql --env load
+
+  # 4. The run's project, index, documents, users and sessions.
+  seed:
+    needs: [manifest, create, seed-config]
+    environment: load-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_ENV_NAME: load
+      API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+      TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+      API_SCOPE: ${{ needs.create.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      APPLIED_AT: ${{ needs.seed-config.outputs.applied_at }}
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.manifest.outputs.commit }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the test tooling from the lockfile
+        run: uv sync --locked --package docchat-testing --package docchat-ops
+
+      - name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Sign in to Azure as the CI test identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Read the environment's outputs
+        run: |
+          azd auth login --client-id "$DOCCHAT_CI_TEST_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new load --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP rg-docchat-load
+          azd env refresh -e load --no-prompt
+
+      # docchat-load tokens opens and closes the test vault's read window itself.
+      - name: Acquire the load users' tokens
+        run: uv run --no-sync docchat-load tokens --env load --aliases load-01..load-20,load-admin --out "$RUNNER_TEMP/tokens.json"
+
+      - name: Seed the load run
+        run: uv run --no-sync docchat-load seed --tokens "$RUNNER_TEMP/tokens.json" --applied-at "$APPLIED_AT"
+
+      - name: Delete the token file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/tokens.json"
+
+      - name: Remove the test vault's runner rule
+        if: ${{ always() && vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env load
+
+  # 5. The smoke suite with the load alias map, and the 200-second stream test (T-597).
+  smoke:
+    needs: [create, seed]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deployed-tests.yaml
+    with:
+      environment: load
+      suite: smoke
+
+  # 6. chat.max_turn_seconds back to its default 180 before S1, so S2's lease bound is
+  # production's; it runs whenever seed-config ran.
+  stream-reset:
+    needs: [manifest, seed-config, smoke]
+    if: ${{ always() && needs.seed-config.result == 'success' }}
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      applied_at: ${{ steps.config.outputs.applied_at }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      TICKET: ${{ github.run_id }}
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.manifest.outputs.commit }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the operator CLI from the lockfile
+        run: uv sync --locked --package docchat-ops
+
+      - name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Sign in to Azure as the load deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Read the environment's outputs
+        run: |
+          azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new load --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP rg-docchat-load
+          azd env refresh -e load --no-prompt
+
+      - name: Open the SQL runner rule
+        id: open
+        run: |
+          uv run --frozen python scripts/deploy/firewall.py sweep --target sql --env load
+          uv run --frozen python scripts/deploy/firewall.py open --target sql --env load
+
+      - name: Reset the turn deadline
+        id: config
+        run: |
+          set -euo pipefail
+          uv run --no-sync docchat-ops --env load config set --key chat.max_turn_seconds --value 180 \
+            --ticket "$TICKET" --reason "load stream test reset" --yes
+          echo "applied_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Close the SQL runner rule
+        if: ${{ always() && steps.open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target sql --env load
+
+  # 7. S1: 100 concurrent streams on one instance (T-591).
+  s1:
+    needs: [manifest, create, seed, stream-reset]
+    if: ${{ !cancelled() && needs.manifest.outputs.run_s1 == 'true' && needs.seed.result == 'success' && needs.stream-reset.result == 'success' }}
+    environment: load-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SCENARIO: s1
+      SCRIPT: s1-event-loop
+      LENGTH_SECONDS: "600"
+      AZURE_ENV_NAME: load
+      API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+      TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+      API_SCOPE: ${{ needs.create.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      APPLIED_AT: ${{ needs.stream-reset.outputs.applied_at }}
+    steps:
+      - &checkout-release
+        name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.manifest.outputs.commit }}
+
+      - &setup-uv
+        name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - &install-tooling
+        name: Install the test tooling from the lockfile
+        run: uv sync --locked --package docchat-testing --package docchat-ops
+
+      - &install-k6
+        name: Install k6 from the lock
+        run: |
+          set -euo pipefail
+          lock=tests/load/k6.lock.json
+          url="$(jq -r '.url' "$lock")"
+          sha256="$(jq -r '.sha256' "$lock")"
+          member="$(jq -r '.member' "$lock")"
+          curl --fail --silent --show-error --location --proto '=https' --retry 3 --output "$RUNNER_TEMP/k6.tar.gz" "$url"
+          echo "${sha256}  ${RUNNER_TEMP}/k6.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/k6"
+          tar --extract --gzip --file "$RUNNER_TEMP/k6.tar.gz" --directory "$RUNNER_TEMP/k6" --strip-components 1 "$member"
+
+      - &install-bicep
+        name: Install Bicep CLI 0.47.16
+        run: az bicep install --version v0.47.16
+
+      - &setup-azd
+        name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - &login-citest
+        name: Sign in to Azure as the CI test identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - &no-dynamic-install
+        name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - &azd-refresh
+        name: Read the environment's outputs
+        run: |
+          set -euo pipefail
+          azd auth login --client-id "$DOCCHAT_CI_TEST_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new load --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP rg-docchat-load
+          azd env refresh -e load --no-prompt
+          azd env get-values -e load --output json > "$RUNNER_TEMP/values.json"
+          app="$(jq -r '.DOCCHAT_API_APP_NAME // ""' "$RUNNER_TEMP/values.json")"
+          plan="$(az webapp show --resource-group rg-docchat-load --name "$app" --query serverFarmId -o tsv)"
+          setting="$(az monitor autoscale list --resource-group rg-docchat-load --query "[?targetResourceUri=='${plan}'].name" -o tsv)"
+          created="$(az group show --name rg-docchat-load --query 'tags."docchat-load-created"' -o tsv)"
+          {
+            echo "API_APP_NAME=${app}"
+            echo "AUTOSCALE_SETTING=${setting}"
+            echo "RUN_START=${created}"
+          } >> "$GITHUB_ENV"
+
+      # docchat-load tokens opens and closes the test vault's read window itself.
+      - &tokens
+        name: Acquire the load users' tokens
+        run: uv run --no-sync docchat-load tokens --env load --aliases load-01..load-20,load-admin --out "$RUNNER_TEMP/tokens.json"
+
+      - name: Set capacity 1
+        run: &set-capacity |
+          set -euo pipefail
+          az monitor autoscale update --resource-group rg-docchat-load --name "$AUTOSCALE_SETTING" \
+            --min-count "$CAPACITY" --max-count "$MAX_COUNT" --count "$CAPACITY" --output none
+          deadline=$(( SECONDS + 900 ))
+          until [ "$(az webapp list-instances --resource-group rg-docchat-load --name "$API_APP_NAME" --query 'length(@)' -o tsv)" = "$CAPACITY" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::the API didn't reach ${CAPACITY} instances within 15 minutes"; exit 1
+            fi
+            sleep 30
+          done
+        env:
+          CAPACITY: "1"
+          MAX_COUNT: "1"
+
+      # The ops-config cache lifetime of 60 s plus margin after stream-reset.
+      - name: Wait for the ops config
+        run: |
+          remaining=$(( $(date -u -d "$APPLIED_AT" +%s) + 70 - $(date -u +%s) ))
+          if [ "$remaining" -gt 0 ]; then sleep "$remaining"; fi
+
+      - &prepare-generator
+        name: Prepare the load generator
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/k6/k6" inspect "tests/load/k6/${SCRIPT}.js" > /dev/null
+          uv run --no-sync docchat-load aci-params --scenario "$SCENARIO" --bootstrap tests/load/aci/run.py \
+            --script "tests/load/k6/${SCRIPT}.js" --lib tests/load/k6/lib.js \
+            --tokens "$RUNNER_TEMP/tokens.json" --out "$RUNNER_TEMP/loadgen.parameters.json"
+
+      - &run-generator
+        name: Run the load generator
+        id: generator
+        run: |
+          set -euo pipefail
+          group="ci-docchat-loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}"
+          echo "GROUP=${group}" >> "$GITHUB_ENV"
+          az deployment group create --resource-group rg-docchat-load --name "loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}" \
+            --template-file tests/load/aci/loadgen.bicep --parameters @"$RUNNER_TEMP/loadgen.parameters.json" --output none
+          rm -f "$RUNNER_TEMP/loadgen.parameters.json"
+          deadline=$(( SECONDS + LENGTH_SECONDS + 900 ))
+          while true; do
+            status="$(az container show --resource-group rg-docchat-load --name "$group" \
+              --query "{state: instanceView.state, started: containers[0].instanceView.currentState.startTime}" -o json)"
+            state="$(jq -r '.state // ""' <<< "$status")"
+            started="$(jq -r '.started // ""' <<< "$status")"
+            if [ -n "$started" ] && [ -z "${T0:-}" ]; then
+              T0="$(date -u -d "$started" +%Y-%m-%dT%H:%M:%SZ)"
+              echo "T0=${T0}" >> "$GITHUB_ENV"
+              echo "END=$(date -u -d "$started + ${LENGTH_SECONDS} seconds" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+            fi
+            case "$state" in
+              Succeeded|Failed) break ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::${group} didn't finish within the scenario's length plus 15 minutes"; exit 1
+            fi
+            sleep 15
+          done
+
+      - &save-log
+        name: Save the load generator's log
+        if: ${{ !cancelled() && env.GROUP != '' }}
+        run: |
+          mkdir -p "load-results/${SCENARIO}"
+          az container logs --resource-group rg-docchat-load --name "$GROUP" > "load-results/${SCENARIO}/k6.log"
+
+      - &delete-generator
+        name: Delete the load generator
+        if: ${{ always() && env.GROUP != '' }}
+        run: |
+          rm -f "$RUNNER_TEMP/loadgen.parameters.json"
+          az container delete --resource-group rg-docchat-load --name "$GROUP" --yes --output none
+
+      - name: Compute the S1 verdict (T-591)
+        run: >-
+          uv run --no-sync docchat-load verdict --scenario s1 --k6-log load-results/s1/k6.log
+          --start "$T0" --end "$END" --run-start "$RUN_START" --out load-results/s1/verdict.json
+
+      - &upload-results
+        name: Keep the scenario's results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: load-results-${{ env.SCENARIO }}
+          path: load-results/${{ env.SCENARIO }}/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - &restore-profile
+        name: Restore the load profile
+        if: ${{ always() && env.AUTOSCALE_SETTING != '' }}
+        run: >-
+          az monitor autoscale update --resource-group rg-docchat-load --name "$AUTOSCALE_SETTING"
+          --min-count 1 --max-count 6 --count 1 --output none
+
+      - &delete-tokens
+        name: Delete the token file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/tokens.json"
+
+      - &close-vault
+        name: Remove the test vault's runner rule
+        if: ${{ always() && vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env load
+
+  # 7. S2: stopping one of three instances fails only the streams it held (T-592).
+  s2:
+    needs: [manifest, create, seed, stream-reset, s1]
+    if: ${{ !cancelled() && needs.manifest.outputs.run_s2 == 'true' && needs.seed.result == 'success' && needs.stream-reset.result == 'success' }}
+    environment: load-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SCENARIO: s2
+      SCRIPT: s2-stateless
+      LENGTH_SECONDS: "540"
+      AZURE_ENV_NAME: load
+      API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+      TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+      API_SCOPE: ${{ needs.create.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+    steps:
+      - *checkout-release
+      - *setup-uv
+      - *install-tooling
+      - *install-k6
+      - *install-bicep
+      - *setup-azd
+      - *login-citest
+      - *no-dynamic-install
+      - *azd-refresh
+      - *tokens
+
+      - name: Set capacity 3
+        run: *set-capacity
+        env:
+          CAPACITY: "3"
+          MAX_COUNT: "3"
+
+      - *prepare-generator
+
+      # At T0 + 240 s the capacity drops to 2; T_r is the first 5-second poll that shows 2
+      # instances, and the scenario then runs to its end.
+      - name: Run the load generator and remove one instance
+        id: generator
+        run: |
+          set -euo pipefail
+          group="ci-docchat-loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}"
+          echo "GROUP=${group}" >> "$GITHUB_ENV"
+          az deployment group create --resource-group rg-docchat-load --name "loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}" \
+            --template-file tests/load/aci/loadgen.bicep --parameters @"$RUNNER_TEMP/loadgen.parameters.json" --output none
+          rm -f "$RUNNER_TEMP/loadgen.parameters.json"
+          container_status() {
+            az container show --resource-group rg-docchat-load --name "$group" \
+              --query "{state: instanceView.state, started: containers[0].instanceView.currentState.startTime}" -o json
+          }
+          deadline=$(( SECONDS + LENGTH_SECONDS + 900 ))
+          started=""
+          until [ -n "$started" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then echo "::error::${group} never started"; exit 1; fi
+            sleep 5
+            started="$(container_status | jq -r '.started // ""')"
+          done
+          t0=$(date -u -d "$started" +%s)
+          {
+            echo "T0=$(date -u -d "@${t0}" +%Y-%m-%dT%H:%M:%SZ)"
+            echo "END=$(date -u -d "@$(( t0 + LENGTH_SECONDS ))" +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
+          remaining=$(( t0 + 240 - $(date -u +%s) ))
+          if [ "$remaining" -gt 0 ]; then sleep "$remaining"; fi
+          az monitor autoscale update --resource-group rg-docchat-load --name "$AUTOSCALE_SETTING" \
+            --min-count 2 --max-count 2 --count 2 --output none
+          until [ "$(az webapp list-instances --resource-group rg-docchat-load --name "$API_APP_NAME" --query 'length(@)' -o tsv)" = "2" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then echo "::error::the API never reached 2 instances"; exit 1; fi
+            sleep 5
+          done
+          echo "REMOVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          while true; do
+            state="$(container_status | jq -r '.state // ""')"
+            case "$state" in
+              Succeeded|Failed) break ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::${group} didn't finish within the scenario's length plus 15 minutes"; exit 1
+            fi
+            sleep 15
+          done
+
+      - *save-log
+      - *delete-generator
+
+      - name: Compute the S2 verdict (T-592)
+        run: >-
+          uv run --no-sync docchat-load verdict --scenario s2 --k6-log load-results/s2/k6.log
+          --start "$T0" --end "$END" --run-start "$RUN_START" --removed-at "$REMOVED_AT"
+          --tokens "$RUNNER_TEMP/tokens.json" --out load-results/s2/verdict.json
+
+      - *upload-results
+      - *restore-profile
+      - *delete-tokens
+      - *close-vault
+
+  # 7. S3: the alert probe, then calibration and the scale-out main phase (T-593, T-596).
+  s3:
+    needs: [manifest, create, seed, stream-reset, s2]
+    if: ${{ !cancelled() && needs.manifest.outputs.run_s3 == 'true' && needs.seed.result == 'success' && needs.stream-reset.result == 'success' }}
+    environment: load-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 100
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_ENV_NAME: load
+      API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+      TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+      API_SCOPE: ${{ needs.create.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      DOCCHAT_LOAD_ANSWER_TOKENS: ${{ needs.manifest.outputs.answer_tokens }}
+      DOCCHAT_LOAD_TOKEN_DELAY_MS: ${{ needs.manifest.outputs.token_delay_ms }}
+      RATE_INPUT: ${{ needs.manifest.outputs.rate }}
+    steps:
+      - *checkout-release
+      - *setup-uv
+      - *install-tooling
+      - *install-k6
+      - *install-bicep
+      - *setup-azd
+      - *login-citest
+      - *no-dynamic-install
+      - *azd-refresh
+      - *tokens
+
+      - name: Send the alert probe's turns
+        id: probe-send
+        run: uv run --no-sync docchat-load probe-alerts --phase send --tokens "$RUNNER_TEMP/tokens.json" --out load-results/alert-probe/
+
+      - name: Set the load profile with 1 instance
+        if: ${{ !cancelled() }}
+        run: *set-capacity
+        env:
+          CAPACITY: "1"
+          MAX_COUNT: "6"
+
+      - name: Prepare the calibration
+        if: ${{ !cancelled() }}
+        env:
+          SCENARIO: s3-calibrate
+          SCRIPT: s3-calibrate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/k6/k6" inspect "tests/load/k6/${SCRIPT}.js" > /dev/null
+          uv run --no-sync docchat-load aci-params --scenario "$SCENARIO" --bootstrap tests/load/aci/run.py \
+            --script "tests/load/k6/${SCRIPT}.js" --lib tests/load/k6/lib.js \
+            --tokens "$RUNNER_TEMP/tokens.json" --out "$RUNNER_TEMP/loadgen.parameters.json"
+
+      # The calibration's log goes to load-results/s3-calibrate, the main phase's to load-results/s3.
+      - name: Run the calibration
+        if: ${{ !cancelled() }}
+        env:
+          SCENARIO: s3-calibrate
+          LENGTH_SECONDS: "240"
+          RESULTS: s3-calibrate
+        run: &run-s3-generator |
+          set -euo pipefail
+          group="ci-docchat-loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}"
+          az deployment group create --resource-group rg-docchat-load --name "loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}" \
+            --template-file tests/load/aci/loadgen.bicep --parameters @"$RUNNER_TEMP/loadgen.parameters.json" --output none
+          rm -f "$RUNNER_TEMP/loadgen.parameters.json"
+          deadline=$(( SECONDS + LENGTH_SECONDS + 900 ))
+          started=""
+          while true; do
+            status="$(az container show --resource-group rg-docchat-load --name "$group" \
+              --query "{state: instanceView.state, started: containers[0].instanceView.currentState.startTime}" -o json)"
+            state="$(jq -r '.state // ""' <<< "$status")"
+            started="${started:-$(jq -r '.started // ""' <<< "$status")}"
+            case "$state" in
+              Succeeded|Failed) break ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::${group} didn't finish within the scenario's length plus 15 minutes"; exit 1
+            fi
+            sleep 15
+          done
+          prefix="$(printf '%s' "$SCENARIO" | tr 'a-z-' 'A-Z_')"
+          {
+            echo "${prefix}_T0=$(date -u -d "$started" +%Y-%m-%dT%H:%M:%SZ)"
+            echo "${prefix}_END=$(date -u -d "$started + ${LENGTH_SECONDS} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
+          mkdir -p "load-results/${RESULTS}"
+          az container logs --resource-group rg-docchat-load --name "$group" > "load-results/${RESULTS}/k6.log"
+
+      - name: Delete the calibration's load generator
+        if: always()
+        env:
+          SCENARIO: s3-calibrate
+        run: &delete-s3-generator |
+          rm -f "$RUNNER_TEMP/loadgen.parameters.json"
+          group="ci-docchat-loadgen-${SCENARIO}-${GITHUB_RUN_NUMBER}"
+          if az container show --resource-group rg-docchat-load --name "$group" --output none 2>/dev/null; then
+            az container delete --resource-group rg-docchat-load --name "$group" --yes --output none
+          fi
+
+      - name: Set the main phase's rate
+        id: rate
+        if: ${{ !cancelled() && env.S3_CALIBRATE_T0 != '' }}
+        run: |
+          set -euo pipefail
+          set -- --start "$S3_CALIBRATE_T0" --answer-tokens "$DOCCHAT_LOAD_ANSWER_TOKENS" --out load-results/s3/rate.json
+          if [ -n "$RATE_INPUT" ]; then set -- "$@" --rate "$RATE_INPUT"; fi
+          uv run --no-sync docchat-load s3-rate "$@"
+          {
+            echo "rate=$(jq -r '.rate' load-results/s3/rate.json)"
+            echo "inconclusive=$(jq -r '.inconclusive' load-results/s3/rate.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the main phase
+        if: ${{ !cancelled() && steps.rate.outputs.inconclusive == 'false' }}
+        env:
+          SCENARIO: s3-scaleout
+          SCRIPT: s3-scaleout
+          DOCCHAT_LOAD_RATE: ${{ steps.rate.outputs.rate }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/k6/k6" inspect "tests/load/k6/${SCRIPT}.js" > /dev/null
+          uv run --no-sync docchat-load aci-params --scenario "$SCENARIO" --bootstrap tests/load/aci/run.py \
+            --script "tests/load/k6/${SCRIPT}.js" --lib tests/load/k6/lib.js \
+            --tokens "$RUNNER_TEMP/tokens.json" --out "$RUNNER_TEMP/loadgen.parameters.json"
+
+      - name: Run the main phase
+        if: ${{ !cancelled() && steps.rate.outputs.inconclusive == 'false' }}
+        env:
+          SCENARIO: s3-scaleout
+          LENGTH_SECONDS: "900"
+          RESULTS: s3
+        run: *run-s3-generator
+
+      - name: Delete the main phase's load generator
+        if: always()
+        env:
+          SCENARIO: s3-scaleout
+        run: *delete-s3-generator
+
+      - name: Compute the S3 verdict (T-593)
+        if: ${{ !cancelled() && env.S3_SCALEOUT_T0 != '' }}
+        run: >-
+          uv run --no-sync docchat-load verdict --scenario s3 --k6-log load-results/s3/k6.log
+          --start "$S3_SCALEOUT_T0" --end "$S3_SCALEOUT_END" --run-start "$RUN_START"
+          --rate load-results/s3/rate.json --out load-results/s3/verdict.json
+
+      - name: Check the alert probe (T-596)
+        if: ${{ always() && steps.probe-send.outcome == 'success' }}
+        run: uv run --no-sync docchat-load probe-alerts --phase check --out load-results/alert-probe/ --run-start "$RUN_START"
+
+      - name: Keep the S3 results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: load-results-s3
+          path: load-results/s3/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Keep the calibration's results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: load-results-s3-calibrate
+          path: load-results/s3-calibrate/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Keep the alert probe's results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: load-results-alert-probe
+          path: load-results/alert-probe/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - *restore-profile
+      - *delete-tokens
+      - *close-vault
+
+  # 8. Parallelism 1 for S4 set 1.
+  s4-set1-config:
+    needs: [manifest, seed, s3]
+    if: ${{ !cancelled() && needs.manifest.outputs.run_s4 == 'true' && needs.seed.result == 'success' }}
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      applied_at: ${{ steps.config.outputs.applied_at }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      TICKET: ${{ github.run_id }}
+      PARALLEL_ITEMS: "1"
+      REASON: load S4 set 1
+    steps: &s4-config-steps
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.manifest.outputs.commit }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the operator CLI from the lockfile
+        run: uv sync --locked --package docchat-ops
+
+      - name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Sign in to Azure as the load deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Read the environment's outputs
+        run: |
+          azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new load --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP rg-docchat-load
+          azd env refresh -e load --no-prompt
+
+      - name: Open the SQL runner rule
+        id: open
+        run: |
+          uv run --frozen python scripts/deploy/firewall.py sweep --target sql --env load
+          uv run --frozen python scripts/deploy/firewall.py open --target sql --env load
+
+      - name: Set the ingestion parallelism
+        id: config
+        run: |
+          set -euo pipefail
+          uv run --no-sync docchat-ops --env load config set --key ingestion.max_parallel_items --value "$PARALLEL_ITEMS" \
+            --ticket "$TICKET" --reason "$REASON" --yes
+          echo "applied_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Close the SQL runner rule
+        if: ${{ always() && steps.open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target sql --env load
+
+  # 9. S4 set 1: variant a into load-ingest-a at parallelism 1 (T-594).
+  s4-set1:
+    needs: [manifest, create, s4-set1-config]
+    if: ${{ !cancelled() && needs.s4-set1-config.result == 'success' }}
+    environment: load-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SET: "1"
+      VARIANT: a
+      AZURE_ENV_NAME: load
+      API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+      TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+      API_SCOPE: ${{ needs.create.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      APPLIED_AT: ${{ needs.s4-set1-config.outputs.applied_at }}
+    steps:
+      - *checkout-release
+      - *setup-uv
+      - *install-tooling
+      - *setup-azd
+      - *login-citest
+      - *no-dynamic-install
+      - *azd-refresh
+
+      - &wait-s4-config
+        name: Wait for the ops config
+        run: |
+          remaining=$(( $(date -u -d "$APPLIED_AT" +%s) + 70 - $(date -u +%s) ))
+          if [ "$remaining" -gt 0 ]; then sleep "$remaining"; fi
+
+      - &build-corpus
+        name: Build the corpus
+        run: uv run --no-sync docchat-load build-corpus --variant "$VARIANT" --count 200 --out "$RUNNER_TEMP/corpus"
+
+      # The driver reads load-admin's password itself, inside its own read window.
+      - &ingest
+        name: Run the ingestion set
+        run: >-
+          uv run --no-sync docchat-load ingest --env load --variant "$VARIANT" --index "load-ingest-${VARIANT}"
+          --corpus "$RUNNER_TEMP/corpus" --out "load-results/s4-set${SET}/"
+
+      - name: Compute the S4 set 1 verdict (T-594)
+        run: >-
+          uv run --no-sync docchat-load verdict --scenario s4 --set 1 --results load-results/s4-set1/
+          --run-start "$RUN_START" --out load-results/s4-set1/verdict.json
+
+      - &upload-s4
+        name: Keep the set's results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: load-results-s4-set${{ env.SET }}
+          path: load-results/s4-set${{ env.SET }}/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - *close-vault
+
+  # 10. Parallelism 4 for S4 set 2.
+  s4-set2-config:
+    needs: [manifest, s4-set1]
+    if: ${{ !cancelled() && needs.s4-set1.result != 'skipped' }}
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      applied_at: ${{ steps.config.outputs.applied_at }}
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      TICKET: ${{ github.run_id }}
+      PARALLEL_ITEMS: "4"
+      REASON: load S4 set 2
+    steps: *s4-config-steps
+
+  # 11. S4 set 2: variant b into load-ingest-b at parallelism 4, judged against set 1 (T-594).
+  s4-set2:
+    needs: [manifest, create, s4-set1, s4-set2-config]
+    if: ${{ !cancelled() && needs.s4-set2-config.result == 'success' }}
+    environment: load-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    env:
+      SET: "2"
+      VARIANT: b
+      AZURE_ENV_NAME: load
+      API_BASE_URL: ${{ needs.create.outputs.api_base_url }}
+      TEST_CLIENT_ID: ${{ needs.create.outputs.test_client_id }}
+      API_SCOPE: ${{ needs.create.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      APPLIED_AT: ${{ needs.s4-set2-config.outputs.applied_at }}
+    steps:
+      - *checkout-release
+      - *setup-uv
+      - *install-tooling
+      - *setup-azd
+      - *login-citest
+      - *no-dynamic-install
+      - *azd-refresh
+      - *wait-s4-config
+      - *build-corpus
+      - *ingest
+
+      - name: Download set 1's results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: load-results-s4-set1
+          path: load-results/s4-set1
+
+      - name: Compute the S4 set 2 verdict (T-594)
+        run: >-
+          uv run --no-sync docchat-load verdict --scenario s4 --set 2 --results load-results/s4-set2/
+          --set1-results load-results/s4-set1/ --run-start "$RUN_START" --out load-results/s4-set2/verdict.json
+
+      - *upload-s4
+      - *close-vault
+
+  # 12. Parallelism back to 1; it runs whenever s4-set2-config ran.
+  s4-reset:
+    needs: [manifest, s4-set2-config, s4-set2]
+    if: ${{ always() && needs.s4-set2-config.result == 'success' }}
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      TICKET: ${{ github.run_id }}
+      PARALLEL_ITEMS: "1"
+      REASON: load S4 reset
+    steps: *s4-config-steps
+
+  # 13. Every selected scenario and the alert probe must be passed; inconclusive fails the run too.
+  verdict:
+    needs: [manifest, s1, s2, s3, s4-set1, s4-set2]
+    if: ${{ always() && needs.manifest.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # actions and pull-requests read the release commit's ci.yaml run for S5; no Azure sign-in.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Download the verdicts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: load-results-*
+          path: load-results
+
+      # S5 isn't a load profile (84-testing.md section 7.5): the Cosmos DB data-access audit and the
+      # plan integration test run in the python-tests job, which runs the whole suite with no skip,
+      # so that job's conclusion on the release commit is S5's verdict. ci.yaml runs on pull
+      # requests, so the run is the one of the pull request merged as the release commit.
+      - name: Read S5 from the release commit's python-tests job (T-595)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.manifest.outputs.commit }}
+        run: |
+          set -euo pipefail
+          dir=load-results/load-results-s5
+          mkdir -p "$dir"
+          write() {
+            jq -n --arg status "$1" --arg detail "$2" --arg run "$3" --arg commit "$COMMIT" \
+              '{scenario: "s5", status: $status, inconclusive: false, cause: null,
+                criteria: [{id: "S5", passed: ($status == "passed"), detail: $detail}],
+                measurements: {commit: $commit, ciRunId: $run}}' > "$dir/verdict.json"
+          }
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/pulls" > "$RUNNER_TEMP/pulls.json"
+          head="$(jq -r --arg commit "$COMMIT" '[.[] | select(.merge_commit_sha == $commit)][0].head.sha // ""' "$RUNNER_TEMP/pulls.json")"
+          if [ -z "$head" ]; then
+            write failed "no pull request was merged as ${COMMIT}" ""
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yaml/runs?head_sha=${head}&event=pull_request&status=completed&per_page=20" \
+            > "$RUNNER_TEMP/runs.json"
+          run="$(jq -r '[.workflow_runs[]] | sort_by(.run_started_at) | last | .id // ""' "$RUNNER_TEMP/runs.json")"
+          if [ -z "$run" ]; then
+            write failed "no completed ci.yaml run for the pull request's head ${head}" ""
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
+          conclusion="$(jq -r '[.jobs[] | select(.name == "python-tests")][0].conclusion // "missing"' "$RUNNER_TEMP/jobs.json")"
+          if [ "$conclusion" = "success" ]; then
+            write passed "python-tests succeeded in ci.yaml run ${run}" "$run"
+          else
+            write failed "python-tests ended ${conclusion} in ci.yaml run ${run}" "$run"
+          fi
+
+      - name: Keep the S5 verdict
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: load-results-s5
+          path: load-results/load-results-s5/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Judge the run
+        env:
+          RUN_S1: ${{ needs.manifest.outputs.run_s1 }}
+          RUN_S2: ${{ needs.manifest.outputs.run_s2 }}
+          RUN_S3: ${{ needs.manifest.outputs.run_s3 }}
+          RUN_S4: ${{ needs.manifest.outputs.run_s4 }}
+        run: |
+          set -uo pipefail
+          expected=(s5)
+          [ "$RUN_S1" = "true" ] && expected+=(s1)
+          [ "$RUN_S2" = "true" ] && expected+=(s2)
+          [ "$RUN_S3" = "true" ] && expected+=(s3 alert-probe)
+          [ "$RUN_S4" = "true" ] && expected+=(s4-set1 s4-set2)
+          failed=0
+          {
+            echo "## Load test verdicts"
+            echo ""
+            echo "| Scenario | Status | Cause |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for name in "${expected[@]}"; do
+            file="load-results/load-results-${name}/verdict.json"
+            if [ -f "$file" ]; then
+              status="$(jq -r '.status' "$file")"
+              cause="$(jq -r '.cause // ""' "$file")"
+            else
+              status="missing"
+              cause=""
+            fi
+            echo "| ${name} | ${status} | ${cause} |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$status" != "passed" ]; then
+              echo "::error::${name}: ${status} ${cause}"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  # 14. The run's environment is removed whatever happened; nightly.yaml's load-guard removes one
+  # whose teardown never ran.
+  teardown:
+    needs: [manifest, create, access-gate, seed-config, seed, smoke, stream-reset, s1, s2, s3, s4-set1-config, s4-set1, s4-set2-config, s4-set2, s4-reset, verdict]
+    if: ${{ always() && needs.manifest.result == 'success' }}
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: docchat-env-load
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.manifest.outputs.commit }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Sign in to Azure as the load deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # The lifecycle check's last half: an empty group and the run's registrations gone (T-468).
+      - name: Tear down the load environment (T-468)
+        run: uv run --frozen python scripts/deploy/teardown_load.py

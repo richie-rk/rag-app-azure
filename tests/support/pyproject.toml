@@ -1,0 +1,45 @@
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "docchat-testing"
+version = "0.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "docchat-core",
+  "docchat-api",
+  "pytest>=9.1.1,<10",
+  "pytest-asyncio>=1.4.0,<2",
+  "httpx>=0.28.1,<1",
+  "httpcore2>=2.16.0,<3",
+  "fastapi>=0.143.1,<1",
+  "pydantic>=2.14.1,<3",
+  "pyjwt[crypto]>=2.15.1,<3",
+  "cryptography>=50.0.2,<51",
+  "sqlalchemy>=2.1.4,<3",
+  "alembic>=1.20.0,<2",
+  "azure-core[aio]>=1.41.0,<2",
+  "azure-identity>=1.26.0,<2",
+  "azure-keyvault-secrets>=4.11.3,<5",
+  "azure-cosmos>=4.17.1,<5",
+  "azure-storage-blob>=12.31.0,<13",
+  "azure-storage-queue>=12.18.0,<13",
+  "azure-functions-durable>=1.7.0,<2",
+  "azure-ai-documentintelligence>=1.0.2,<2",
+  "opentelemetry-api>=1.45.1,<2",
+  "opentelemetry-sdk>=1.45.1,<2",
+  "uvicorn>=0.54.0,<1",
+]
+[project.scripts]
+docchat-load = "docchat_testing.load:main"
+
+# The fixture generator (tests/fixtures/documents/generate.py) runs from the development
+# environment and sits outside src/, so its libraries are a development group, not runtime.
+[dependency-groups]
+dev = [
+  "pikepdf>=10.17.0,<11",
+  "pillow>=13.0.0,<14",
+  "python-docx>=1.2.0,<2",
+  "python-pptx>=1.0.2,<2",
+]

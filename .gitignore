@@ -1,48 +1,22 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
 .venv/
-venv/
-*.egg
-
-# Environment
-.env
-local.settings.json
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Node
-node_modules/
-ui/dist/
-ui/build/
-*.tsbuildinfo
-
-# Azure Functions
-bin/
-obj/
-.python_packages/
-
-# Markdown (except README)
-*.md
-!README.md
-
-# Provisioning
-infra/.suffix
-.azure/
-
-# Misc
-*.log
+__pycache__/
+*.pyc
 .pytest_cache/
-coverage/
-htmlcov/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+reports/
+build/
+dist/
+node_modules/
+apps/web/dist/
+apps/web/config.local.json
+test-results/
+playwright-report/
+load-results/
+*.zip
+*.tar
+*.tgz
+.env
+.azure/

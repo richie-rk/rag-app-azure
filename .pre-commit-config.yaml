@@ -1,0 +1,77 @@
+minimum_pre_commit_version: "4.7.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      # --enforce-all makes the size check cover every tracked file under --all-files in CI,
+      # not only files staged for addition.
+      - id: check-added-large-files
+        args: ["--maxkb=1024", "--enforce-all"]
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      # PSRule's .Rule.yaml files hold one resource per YAML document (83-infrastructure.md
+      # sections 13.3 and 13.4).
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+      - id: check-json
+        # TypeScript configuration files allow comments, which strict JSON parsing refuses.
+        exclude: (^|/)tsconfig[^/]*\.json$
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: detect-private-key
+      - id: forbid-submodules
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: d4acaec07ac3bc6017fba3c3b8e9810af1b615db  # frozen: 0.13.1
+    hooks:
+      - id: uv-lock
+        args: ["--locked"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 44b5042edab9382aba712eed4f9c7bab7a3d6a3e  # frozen: v0.17.0
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run --frozen mypy
+        language: system
+        pass_filenames: false
+        types: [python]
+
+  - repo: local
+    hooks:
+      # Each npm script checks its whole package, so pre-commit passes it no file names.
+      - id: web-format
+        name: web-format
+        entry: npm --prefix apps/web run format:check
+        language: system
+        pass_filenames: false
+        files: ^(apps/web|tests/e2e)/
+      - id: web-lint
+        name: web-lint
+        entry: npm --prefix apps/web run lint
+        language: system
+        pass_filenames: false
+        files: ^(apps/web|tests/e2e)/
+      - id: web-typecheck
+        name: web-typecheck
+        entry: npm --prefix apps/web run typecheck
+        language: system
+        pass_filenames: false
+        files: ^(apps/web|tests/e2e)/
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
+    hooks:
+      # The hook's own entry is `gitleaks git --pre-commit --redact --staged --verbose`; pre-commit
+      # bootstraps Go when it is absent.
+      - id: gitleaks

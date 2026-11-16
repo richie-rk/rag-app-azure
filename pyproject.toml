@@ -1,0 +1,195 @@
+[project]
+name = "docchat-workspace"
+version = "0.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "ruff==0.17.0", "mypy==2.4.0", "pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-timeout==2.4.0",
+  "pytest-cov==7.1.0", "coverage==7.16.2", "respx==0.23.1", "pre-commit==4.7.0", "pip-audit==2.10.1",
+  "deptry==0.25.1", "import-linter==2.15", "zizmor==1.30.1", "docchat-testing",
+]
+torch-cpu = ["torch==2.14.1", "torchvision==0.29.1"]
+
+[tool.uv]
+package = false
+required-version = "==0.13.1"
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
+[tool.uv.workspace]
+members = ["packages/core", "apps/api", "apps/ingestion", "db", "scripts/ops", "tests/support", "tests/model-stub"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+docchat-core = { workspace = true }
+docchat-api = { workspace = true }
+docchat-testing = { workspace = true }
+torch = [
+  { url = "https://download.pytorch.org/whl/cpu/torch-2.14.1%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
+]
+torchvision = [
+  { url = "https://download.pytorch.org/whl/cpu/torchvision-0.29.1%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" },
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "A", "C4", "DTZ", "T10", "T20", "ISC", "G", "LOG", "PIE", "PT",
+          "RET", "SIM", "TID", "PTH", "ERA", "PL", "TRY", "BLE", "S", "ASYNC", "RUF", "FAST", "PERF"]
+ignore = ["TRY003", "TRY400", "PLR0913"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"requests".msg = "Use httpx.AsyncClient."
+"urllib.request".msg = "Use httpx.AsyncClient."
+"httpx.Client".msg = "Use httpx.AsyncClient."
+"httpx2".msg = "httpx2 is the openai package's transport; only docchat_core.clients.openai configures it."
+"openai.OpenAI".msg = "Use openai.AsyncOpenAI against /openai/v1/, built by docchat_core.clients."
+"openai.AzureOpenAI".msg = "Use openai.AsyncOpenAI against /openai/v1/, built by docchat_core.clients."
+"openai.AsyncAzureOpenAI".msg = "Use openai.AsyncOpenAI against /openai/v1/, built by docchat_core.clients."
+"azure.identity.DefaultAzureCredential".msg = "Use the process credential from docchat_core.clients."
+"azure.identity.ManagedIdentityCredential".msg = "Use azure.identity.aio through docchat_core.clients."
+"azure.identity.AzureCliCredential".msg = "Use azure.identity.aio.AzureCliCredential."
+"azure.storage.blob.BlobServiceClient".msg = "Use azure.storage.blob.aio through docchat_core.clients."
+"azure.storage.queue.QueueClient".msg = "Use azure.storage.queue.aio through docchat_core.clients."
+"azure.cosmos.CosmosClient".msg = "Use azure.cosmos.aio through docchat_core.clients."
+"azure.search.documents.SearchClient".msg = "Use docchat_core.clients.search_client()."
+"azure.search.documents.indexes.SearchIndexClient".msg = "Use azure.search.documents.indexes.aio through docchat_core.clients."
+"azure.ai.documentintelligence.DocumentIntelligenceClient".msg = "Use azure.ai.documentintelligence.aio through docchat_core.clients."
+"azure.keyvault.secrets.SecretClient".msg = "Use azure.keyvault.secrets.aio."
+"sqlalchemy.text".msg = "Write raw SQL only as constants in docchat_core.sql.statements."
+"pyodbc".msg = "Reach SQL only through docchat_core.sql.engine."
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "PLR2004", "S105", "S106"]
+"packages/core/src/docchat_core/sql/statements.py" = ["TID251"]
+"packages/core/src/docchat_core/sql/engine.py" = ["TID251"]
+"db/migrations/**" = ["TID251"]
+"packages/core/src/docchat_core/clients/openai.py" = ["TID251"]
+"tests/model-stub/**" = ["TID251"]
+"scripts/ci/**" = ["TID251"]
+"scripts/deploy/**" = ["TID251"]
+"tests/load/aci/run.py" = ["TID251"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["docchat_core", "docchat_api", "docchat_ingestion", "docchat_ops", "docchat_testing", "docchat_model_stub"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+explicit_package_bases = true
+mypy_path = ["packages/core/src", "apps/api/src", "apps/ingestion/src", "scripts/ops/src", "tests/support/src",
+             "tests/model-stub/src", "scripts/ci", "scripts/deploy", "scripts/deploy/hooks", "scripts/preflight",
+             "scripts/bootstrap", "scripts", "tests/infra/helpers", "tests/support/tests/bootstrap/harness"]
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool", "possibly-undefined",
+                     "unused-awaitable", "explicit-override"]
+plugins = ["pydantic.mypy"]
+files = ["packages/core/src", "packages/core/tests", "apps/api/src", "apps/api/tests",
+         "apps/ingestion/src", "apps/ingestion/tests", "scripts/ops/src", "scripts/ops/tests",
+         "tests/support/src", "tests/support/tests", "tests/model-stub/src", "tests/model-stub/tests",
+         "tests/integration", "tests/deployed", "tests/infra", "tests/load/aci", "scripts/ci", "db/migrations"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[[tool.mypy.overrides]]
+module = ["azure.durable_functions.*", "gunicorn.*", "lxml.*", "unstructured_inference.*", "uvicorn_worker.*"]
+follow_untyped_imports = true
+
+[tool.pytest.ini_options]
+minversion = "9.1"
+testpaths = ["packages/core/tests", "apps/api/tests", "apps/ingestion/tests", "scripts/ops/tests",
+             "tests/support/tests", "tests/model-stub/tests", "tests/integration"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--import-mode=importlib", "-p", "docchat_testing.plugin"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+asyncio_debug = true
+timeout = 60
+xfail_strict = true
+filterwarnings = ["error"]
+markers = [
+  "integration: needs the compose services",
+  "live: needs live Azure services; runs only with --live",
+  "deployed: needs a deployed environment; runs only with --deployed",
+  "smoke: deployed smoke suite",
+  "full: deployed full suite",
+  "resume: start of the deployed crash-resume test",
+  "prod_smoke: prod's anonymous deployed checks",
+  "scan_prepare: preparation of the deployed malware-scanning suite; dev only",
+  "scan: deployed malware-scanning suite; dev only",
+  "infra: deployed infrastructure suite; dev only, as the dev deploy identity",
+  "allow_blocking(reason): exempts one test from the loop guard; tests/support/tests only",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["docchat_core", "docchat_api", "docchat_ingestion", "docchat_ops", "docchat_model_stub"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.docchat.test-layout]
+exempt = [
+  { path = "apps/ingestion/function_app.py", reason = "two-line entry shim" },
+]
+
+[tool.importlinter]
+root_packages = ["docchat_core", "docchat_api", "docchat_ingestion", "docchat_ops", "docchat_testing", "docchat_model_stub"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "1 core imports no deployable or tool"
+type = "forbidden"
+source_modules = ["docchat_core"]
+forbidden_modules = ["docchat_api", "docchat_ingestion", "docchat_ops", "docchat_testing", "docchat_model_stub"]
+
+[[tool.importlinter.contracts]]
+name = "2 the two apps are independent"
+type = "independence"
+modules = ["docchat_api", "docchat_ingestion"]
+
+[[tool.importlinter.contracts]]
+name = "3 production code imports no test code"
+type = "forbidden"
+source_modules = ["docchat_core", "docchat_api", "docchat_ingestion"]
+forbidden_modules = ["docchat_testing", "docchat_model_stub"]
+
+[[tool.importlinter.contracts]]
+name = "4 telemetry and settings sit at the bottom of core"
+type = "forbidden"
+source_modules = ["docchat_core.telemetry", "docchat_core.settings"]
+forbidden_modules = [
+  "docchat_core.clients", "docchat_core.sql", "docchat_core.opsconfig", "docchat_core.auth",
+  "docchat_core.access", "docchat_core.users", "docchat_core.audit", "docchat_core.memory",
+  "docchat_core.chat", "docchat_core.cosmos", "docchat_core.search", "docchat_core.ingestion",
+]
+
+[[tool.importlinter.contracts]]
+name = "5 only the SQL engine imports pyodbc"
+type = "forbidden"
+source_modules = ["docchat_core", "docchat_api", "docchat_ingestion", "docchat_ops", "docchat_testing", "docchat_model_stub"]
+forbidden_modules = ["pyodbc"]
+ignore_imports = ["docchat_core.sql.engine -> pyodbc"]
+
+[[tool.importlinter.contracts]]
+name = "7 only the OpenAI client module imports httpx2"
+type = "forbidden"
+source_modules = ["docchat_core", "docchat_api", "docchat_ingestion", "docchat_ops", "docchat_testing", "docchat_model_stub"]
+forbidden_modules = ["httpx2"]
+ignore_imports = ["docchat_core.clients.openai -> httpx2"]

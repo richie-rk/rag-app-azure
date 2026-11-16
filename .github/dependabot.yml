@@ -1,0 +1,49 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule: &weekly {interval: "weekly", day: "monday", time: "05:00", timezone: "Etc/UTC"}
+    open-pull-requests-limit: 10
+    cooldown: &cooldown {default-days: 7, semver-major-days: 30, semver-minor-days: 7, semver-patch-days: 3}
+    commit-message: {prefix: "deps"}
+    ignore:
+      - dependency-name: "torch"
+      - dependency-name: "torchvision"
+    groups:
+      azure-sdk:
+        patterns: ["azure-*"]
+        exclude-patterns: ["azure-monitor-opentelemetry*"]
+      opentelemetry:
+        patterns: ["opentelemetry-*", "azure-monitor-opentelemetry*"]
+      dev-tools:
+        patterns: ["ruff", "mypy", "pytest", "pytest-*", "coverage", "respx", "pre-commit", "pip-audit",
+                   "deptry", "import-linter", "zizmor"]
+  - package-ecosystem: "npm"
+    directories: ["/apps/web", "/tests/e2e", "/scripts/deploy/swa-cli"]
+    schedule: *weekly
+    open-pull-requests-limit: 10
+    cooldown: *cooldown
+    commit-message: {prefix: "deps"}
+    groups:
+      react: {patterns: ["react*", "@types/react*"]}
+      lint: {patterns: ["eslint*", "@eslint/*", "typescript-eslint", "prettier"]}
+      test: {patterns: ["vitest", "@vitest/*", "@testing-library/*", "msw", "jsdom", "@playwright/test", "@axe-core/*"]}
+      msal: {patterns: ["@azure/msal-*"]}
+  - package-ecosystem: "docker"
+    directories: ["/apps/api", "/apps/ingestion", "/tests/model-stub"]
+    schedule: *weekly
+    open-pull-requests-limit: 10
+    cooldown: *cooldown
+    commit-message: {prefix: "deps"}
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule: *weekly
+    open-pull-requests-limit: 10
+    cooldown: *cooldown
+    commit-message: {prefix: "deps"}
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: *weekly
+    open-pull-requests-limit: 10
+    cooldown: *cooldown
+    commit-message: {prefix: "deps"}

@@ -1,0 +1,42 @@
+{
+  "models": [
+    {
+      "repository": "unstructuredio/yolo_x_layout",
+      "revision": "7680d6f857780bcf8d49916aa2e8881bd49dee3e",
+      "files": [
+        {
+          "path": "yolox_l0.05.onnx",
+          "sha256": "134301ca94fb0df8027be9a6dad1908fe6218af8ffa4d34f0819c7c2226195f3"
+        }
+      ]
+    },
+    {
+      "repository": "microsoft/table-transformer-structure-recognition",
+      "revision": "f4d4bdc85c3fe4b1fa49658882a5d38bbdd0f343",
+      "files": [
+        {
+          "path": "config.json",
+          "sha256": "9fa1108c9fbfac69086d23bdd26b9a2242a56a72766fed98c6dfaeaae59ebf76"
+        },
+        {
+          "path": "model.safetensors",
+          "sha256": "f581da65a586591124cac9545b09b93e4e8bf28ce3a8357af6ac15ce94fce16b"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "sha256": "4bd6700976c66662678a521e529b06dca36df041c9d411884cb92e81bc5a6818"
+        }
+      ]
+    },
+    {
+      "repository": "timm/resnet18.a1_in1k",
+      "revision": "491b427b45c94c7fb0e78b5474cc919aff584bbf",
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "80c49dee3da4822c009c5a7fe591e9223c5a2cfcf95a4067ca4dfb5a7b89c612"
+        }
+      ]
+    }
+  ]
+}

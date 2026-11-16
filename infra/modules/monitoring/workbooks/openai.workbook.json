@@ -1,0 +1,194 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "5a0aa9fe-9893-5c36-b981-9dfc1e8920fe",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.openai.throttled\", \"docchat.ingestion.throttled\") | summarize throttled = sum(Sum) by deployment = tostring(Properties[\"deployment\"]), bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "429s by deployment, chat path and ingestion",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "throttled-by-deployment"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let calls = AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.openai.duration\" | summarize calls = sum(ItemCount) by deployment = tostring(Properties[\"deployment\"]); let thr = AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.openai.throttled\" | summarize throttled = sum(Sum) by deployment = tostring(Properties[\"deployment\"]); calls | join kind=leftouter thr on deployment | extend throttledPct = round(100.0 * coalesce(throttled, 0.0) / calls, 2) | project deployment, calls, throttledPct",
+        "size": 0,
+        "title": "Throttled share of chat-path calls",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "throttled-share"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name in (\"docchat.chat.generate\", \"docchat.chat.rewrite\", \"docchat.chat.search_passage\", \"docchat.chat.followups\", \"docchat.chat.embed\", \"docchat.summary.rebuild\", \"docchat.memory.extract\") | summarize p50 = percentile(DurationMs, 50), p95 = percentile(DurationMs, 95), calls = sum(ItemCount) by Name, deployment = tostring(Properties[\"docchat.deployment\"])",
+        "size": 0,
+        "title": "Model-call latency p50 and p95 by call",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "call-latency-by-call"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name == \"docchat.chat.generate\" | extend firstChunk = todouble(Properties[\"docchat.first_chunk_ms\"]) | where isnotnull(firstChunk) | summarize p95 = percentile(firstChunk, 95), calls = count() by deployment = tostring(Properties[\"docchat.deployment\"]), bin(TimeGenerated, 15m)",
+        "size": 0,
+        "title": "First-chunk latency p95 per deployment",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "first-chunk-latency"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.openai.duration\" and tostring(Properties[\"outcome\"]) == \"ok\" | summarize meanMs = sum(Sum) / sum(ItemCount), maxMs = max(Max), calls = sum(ItemCount) by deployment = tostring(Properties[\"deployment\"]), call = tostring(Properties[\"call\"])",
+        "size": 0,
+        "title": "Mean duration of successful calls by deployment and call",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "mean-successful-call"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.openai.tokens\", \"docchat.ingestion.tokens\") | summarize tokens = sum(Sum) by deployment = tostring(Properties[\"deployment\"]), kind = tostring(Properties[\"kind\"]), bin(TimeGenerated, 1h)",
+        "size": 0,
+        "title": "Tokens by deployment and kind",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "tokens-by-deployment"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "union (AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.chat.screening.flagged_sources\", \"docchat.chat.screening.failures\") | summarize n = sum(Sum) by item = Name), (AppEvents | where TimeGenerated {TimeRange} and Name in (\"content_filter_triggered\", \"content_filter_degraded\", \"source_screening_flagged\") | summarize n = todouble(count()) by item = Name)",
+        "size": 0,
+        "title": "Screening and filters",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "screening-and-filters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ingestion.stage.duration\" and tostring(Properties[\"stage\"]) in (\"enrich\", \"embed\") | summarize meanS = sum(Sum) / sum(ItemCount), maxS = max(Max) by stage = tostring(Properties[\"stage\"]), methodKey = tostring(Properties[\"method_key\"])",
+        "size": 0,
+        "title": "Ingestion enrich and embed stage time",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "ingestion-enrich-embed"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

@@ -1,0 +1,177 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "3c7d9e21-6a4b-4f8e-9d2c-1b5e7a9c0f42",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name != \"GET /healthz\" | summarize total = sum(ItemCount), failed = sumif(ItemCount, toint(ResultCode) >= 500) by bin(TimeGenerated, 5m) | extend availabilityPct = round(100.0 * (total - failed) / total, 3) | project TimeGenerated, availabilityPct",
+        "size": 0,
+        "title": "Availability %",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "availability-pct"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and toint(ResultCode) >= 500 | summarize failures = sum(ItemCount) by Name, ResultCode | order by failures desc",
+        "size": 0,
+        "title": "5xx by operation and code",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "5xx-by-operation"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureMetrics | where TimeGenerated {TimeRange} and ResourceId =~ \"{apiSiteId}\" and MetricName == \"HealthCheckStatus\" | summarize healthyPct = avg(Average) by bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Healthy-instance percentage",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "healthy-instances"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureMetrics | where TimeGenerated {TimeRange} and ResourceId =~ \"{apiSiteId}\" and MetricName in (\"Requests\", \"Http5xx\") | summarize value = sum(Total) by MetricName, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Platform requests and front-end 5xx",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "platform-requests"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.api.problems\" | summarize problems = sum(Sum) by code = tostring(Properties[\"code\"]), status = tostring(Properties[\"status\"]) | order by problems desc",
+        "size": 0,
+        "title": "Problems by code",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "problems-by-code"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name !in (\"POST /v1/chat/turns\", \"GET /healthz\") | summarize p50 = percentile(DurationMs, 50), p95 = percentile(DurationMs, 95), requests = sum(ItemCount) by Name | order by requests desc",
+        "size": 0,
+        "title": "Latency by operation, streams excluded",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "latency-by-operation"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.citation.requests\", \"docchat.citation.download_aborts\", \"docchat.chat.disconnects\", \"docchat.chat.drained_turns\") | summarize n = sum(Sum) by Name, detail = coalesce(tostring(Properties[\"outcome\"]), tostring(Properties[\"reason\"]), tostring(Properties[\"phase\"]))",
+        "size": 0,
+        "title": "Citation outcomes, download aborts, stream disconnects and drained turns",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "citations-streams-drains"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

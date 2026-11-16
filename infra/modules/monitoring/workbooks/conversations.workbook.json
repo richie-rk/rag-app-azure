@@ -1,0 +1,211 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "4d35503f-9f54-558b-8238-502a4d6297b6",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"turn_feedback_saved\" | summarize up = countif(tostring(Properties[\"rating\"]) == \"up\"), down = countif(tostring(Properties[\"rating\"]) == \"down\") by projectId = tostring(Properties[\"projectId\"]), day = bin(TimeGenerated, 1d) | extend downRatePct = round(100.0 * down / (up + down), 1)",
+        "size": 0,
+        "title": "Thumbs up and down per project per day, with the down rate",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "feedback-per-project"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"turn_feedback_saved\" and tostring(Properties[\"rating\"]) == \"down\" | summarize n = count() by category = tostring(Properties[\"category\"])",
+        "size": 0,
+        "title": "Negative feedback by category",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "negative-feedback-by-category"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.summary.rebuilds\", \"docchat.summary.truncated\") | summarize n = sum(Sum) by Name, outcome = tostring(Properties[\"outcome\"])",
+        "size": 0,
+        "title": "Summary rebuilds by outcome",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "summary-rebuilds"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and Name == \"docchat.conversations.ensure_post_turn_work\" | extend tokens = todouble(Properties[\"docchat.history.unsummarised_tokens\"]) | where isnotnull(tokens) | summarize p50 = percentile(tokens, 50), p95 = percentile(tokens, 95), turns = count() by bin(TimeGenerated, 1h)",
+        "size": 0,
+        "title": "Unsummarised tokens p50 and p95",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "unsummarised-tokens"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.memory.extractions\", \"docchat.memory.fact_rejections\") | summarize n = sum(Sum) by Name, detail = coalesce(tostring(Properties[\"outcome\"]), tostring(Properties[\"reason\"]))",
+        "size": 0,
+        "title": "Memory extractions by outcome and rejections by reason",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "memory-extractions"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.memory.fact_screenings\" | summarize n = sum(Sum) by source = tostring(Properties[\"source\"]), outcome = tostring(Properties[\"outcome\"])",
+        "size": 0,
+        "title": "Memory fact screenings by source and outcome",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "fact-screenings"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and isnotnull(Properties[\"docchat.cosmos.request_charge\"]) | extend ru = todouble(Properties[\"docchat.cosmos.request_charge\"]) | summarize p50 = percentile(ru, 50), p95 = percentile(ru, 95), calls = sum(ItemCount) by Name | order by calls desc",
+        "size": 0,
+        "title": "Request charge per operation, p50 and p95",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "request-charge-percentiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.conversations.abandoned\", \"docchat.conversations.finalize_superseded\", \"docchat.conversations.duplicates\", \"docchat.conversations.trace_truncated\", \"docchat.conversations.followups_not_saved\") | summarize n = sum(Sum) by Name, bin(TimeGenerated, 1h)",
+        "size": 0,
+        "title": "Abandoned, superseded and duplicate turns",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "abandoned-superseded-duplicates"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CDBDataPlaneRequests | where TimeGenerated {TimeRange} and DatabaseName == \"docchat\" and AadPrincipalId != \"{apiPrincipalId}\" | summarize requests = count(), firstSeen = min(TimeGenerated), lastSeen = max(TimeGenerated) by AadPrincipalId, CollectionName, OperationName",
+        "size": 0,
+        "title": "Human access to conversation data",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "human-access"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

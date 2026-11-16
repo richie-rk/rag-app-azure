@@ -1,0 +1,69 @@
+name: docchat
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-CU9-GDR1-ubuntu-24.04@sha256:742481d1b1186cccc81220a1eaacef244ca8d0f7d19c8e5c70df8ae541ffbab2
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:14330:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${DOCCHAT_LOCAL_SQL_SA_PASSWORD:?run docchat-ops local init}
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -b -o /dev/null"]
+      interval: 6s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data --skipApiVersionCheck --loose
+    ports:
+      - "127.0.0.1:10000:10000"
+      - "127.0.0.1:10001:10001"
+      - "127.0.0.1:10002:10002"
+    volumes:
+      - azurite-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(10000, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 5s
+      retries: 12
+
+  # Readiness is the test plugin's poll of http://127.0.0.1:18080/ready (up to 180 s).
+  cosmos:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-EN20260907@sha256:2db1f9e74c506bcf6fc347aa937aea1c00fa756061296a5a9efba530ce86ec02
+    ports:
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:18080:8080"
+    environment:
+      PROTOCOL: http
+      ENABLE_TELEMETRY: "false"
+    volumes:
+      - cosmos-data:/data
+
+  model-stub:
+    build:
+      context: .
+      dockerfile: tests/model-stub/Dockerfile
+      args:
+        # The image's smoke step requires 40 hexadecimal characters; a local build has no release.
+        DOCCHAT_BUILD_COMMIT: ${DOCCHAT_BUILD_COMMIT:-0000000000000000000000000000000000000000}
+    image: docchat/model-stub:local
+    ports:
+      - "127.0.0.1:8091:8000"
+    environment:
+      DOCCHAT_STUB_RECORD: "true"
+      DOCCHAT_STUB_WORKERS: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 5s
+      retries: 12
+
+volumes:
+  sqlserver-data:
+  azurite-data:
+  cosmos-data:

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "docchat-model-stub"
+version = "0.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi>=0.143.1,<1",
+  "uvicorn>=0.54.0,<1",
+  "pydantic>=2.14.1,<3",
+  "pydantic-settings>=2.16.0,<3",
+]
+
+# A narrow deptry ignore (01-repository.md section 3.3): the image's CMD runs uvicorn, which no
+# module imports.
+[tool.deptry.per_rule_ignores]
+DEP002 = ["uvicorn"]

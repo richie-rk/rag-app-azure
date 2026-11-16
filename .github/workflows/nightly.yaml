@@ -1,0 +1,523 @@
+name: nightly
+
+# Daily at 02:30 UTC, as two schedules so that the Sunday run can be told apart: the deployed
+# infrastructure suite runs on Sundays only.
+on:
+  schedule:
+    - cron: "30 2 * * 1-6"
+    - cron: "30 2 * * 0"
+
+permissions: {}
+
+jobs:
+  test-credential-expiry:
+    environment: dev-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the CI test identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # By default the test vault answers this runner only inside a read window of its own; under
+      # the private-networking option the runner reaches the vault's private endpoint instead.
+      - name: Open the test vault's read window
+        if: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        run: uv run --frozen python scripts/deploy/firewall.py open --target vault --env dev
+
+      # Exit 0 with a warning for a secret expiring within 7 days; an expired one fails (T-545).
+      - name: Check the test-credential expiry (T-545)
+        run: uv run --frozen docchat-ops --env dev testusers check --set all
+
+      - name: Close the test vault's read window
+        if: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env dev
+
+      # Removes this runner's rule when an earlier step failed before its own close; it never
+      # touches another address, so a rule a dead runner left waits for runbook R26.
+      - name: Remove the test vault's runner rule
+        if: ${{ always() && vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env dev
+
+  # The model pins of both long-lived environment files, checked against the region's offering as
+  # the provisioning preflight checks them, so a pin that would block the next provision is known
+  # at least 183 days ahead (ADR 0140). DocChat Preflight Reader lets the dev identity read prod's
+  # account metadata wherever prod lives, with no prod data access.
+  model-watch:
+    environment: dev
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the dev deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # Each check reads every deployment of its environment file, each against its own type: the
+      # chat path's chat, chat-small and embed-query-<key>, and ingestion's ingest-summary and
+      # embed-ingest-<key>. Both run even when the first fails, so one night reports every finding.
+      - name: Check the dev model pins
+        id: dev
+        continue-on-error: true
+        run: uv run --frozen python scripts/preflight/preflight.py --env dev --check models
+
+      - name: Check the prod model pins
+        id: prod
+        continue-on-error: true
+        run: uv run --frozen python scripts/preflight/preflight.py --env prod --check models
+
+      - name: Keep the model reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: preflight-models
+          path: |
+            reports/preflight-dev.json
+            reports/preflight-prod.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # One issue per failing pin, titled by deployment, model and version so a finding keeps one
+      # issue across nights: created when none is open, commented on otherwise (runbook R09). A
+      # warning (retirement within 274 days) is annotated but opens no issue.
+      - name: Record each finding as an issue
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          findings="$RUNNER_TEMP/findings.jsonl"
+          : > "$findings"
+          for env in dev prod; do
+            report="reports/preflight-${env}.json"
+            if [ ! -f "$report" ]; then
+              echo "::error::${env}: the model check wrote no report"
+              continue
+            fi
+            jq -r --arg env "$env" '.checks[] | select(.status == "warn") | "::warning::\($env): \(.detail)"' "$report"
+            jq -c --arg env "$env" '.checks[] | select(.status == "fail") | . + {env: $env}' "$report" >> "$findings"
+          done
+          while IFS= read -r finding; do
+            env="$(jq -r '.env' <<< "$finding")"
+            code="$(jq -r '.code // "none"' <<< "$finding")"
+            detail="$(jq -r '.detail' <<< "$finding")"
+            # The detail starts with "<deployment>: <model> <version> (<type>)".
+            pin="$(jq -r '.detail | capture("^(?<d>[A-Za-z0-9._-]+): (?<m>\\S+) (?<v>\\S+) \\(") | "\(.d) \(.m) \(.v)"' <<< "$finding" 2>/dev/null || true)"
+            if [ -z "$pin" ]; then
+              echo "::error::${env}: ${code}: ${detail}"
+              continue
+            fi
+            title="Model retirement: ${pin}"
+            body="$(printf 'Environment: `%s`\nCode: `%s`\nFinding: %s\nRun: %s\n\nFollow runbook R09 (Model version upgrade). This issue closes when the nightly model-watch passes.' "$env" "$code" "$detail" "$RUN_URL")"
+            # gh reads no prompt from the findings file the loop is reading.
+            number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"${title}\" in:title" --json number,title < /dev/null \
+              | jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')"
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body" < /dev/null
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" < /dev/null
+            fi
+          done < "$findings"
+
+      - name: Fail on a finding
+        if: ${{ steps.dev.outcome == 'failure' || steps.prod.outcome == 'failure' }}
+        run: |
+          echo "::error::a pinned model version fails the model check; see the issues and runbook R09"
+          exit 1
+
+  deployed-full:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deployed-tests.yaml
+    with:
+      environment: dev
+      suite: full
+
+  deployed-infra:
+    if: github.event.schedule == '30 2 * * 0'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deployed-tests.yaml
+    with:
+      environment: dev
+      suite: infra
+
+  # Re-scans the images dev and prod run (T-525), so a vulnerability published after a release still
+  # reaches its team. No site is read: dev's set is the release manifest of the newest deploy.yaml
+  # run whose deploy-dev job succeeded, prod's the images tagged with the commit of the newest
+  # deploy-prod-* tag (83-infrastructure.md sections 6.8 and 10.15). A set that can't be found fails
+  # the job, which names its environment and still scans the other set.
+  trivy-rescan:
+    environment: dev
+    concurrency:
+      group: docchat-registry
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+      issues: write
+    env:
+      TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # The full history brings the deploy-prod-* tags.
+      - name: Check out the repository with its tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      # The release manifest is kept 90 days; an older newest dev deploy fails this set.
+      - name: Find the images dev runs
+        id: dev-set
+        continue-on-error: true
+        run: |
+          run_id=""
+          for candidate in $(gh run list --workflow deploy.yaml --branch main --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run view "$candidate" --json jobs --jq '.jobs[] | select(.name | startswith("deploy-dev")) | .conclusion' | grep -qx success; then
+              run_id="$candidate"
+              break
+            fi
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::dev: no deploy.yaml run whose deploy-dev job succeeded"; exit 1
+          fi
+          if ! gh run download "$run_id" --name release-manifest --dir "$RUNNER_TEMP/dev-manifest"; then
+            echo "::error::dev: run ${run_id} has no release-manifest artifact (missing or expired)"; exit 1
+          fi
+          manifest="$RUNNER_TEMP/dev-manifest/release-manifest.json"
+          : > "$RUNNER_TEMP/dev.txt"
+          for key in apiImage ingestionImage modelStubImage; do
+            reference="$(jq -r --arg key "$key" '.[$key] // ""' "$manifest")"
+            if ! printf '%s' "$reference" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/docchat/(api|ingestion|model-stub)@sha256:[0-9a-f]{64}$'; then
+              echo "::error::dev: the release manifest of run ${run_id} holds no digest reference for ${key}"; exit 1
+            fi
+            echo "$reference" >> "$RUNNER_TEMP/dev.txt"
+          done
+          # Only a complete set is scanned.
+          mkdir -p build/rescan
+          mv "$RUNNER_TEMP/dev.txt" build/rescan/dev.txt
+          echo "dev: the release manifest of run ${run_id}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign in to Azure as the dev deploy identity
+        id: login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Find the shared registry
+        id: registry
+        run: |
+          name="$(az acr list --resource-group rg-docchat-shared --query '[0].name' -o tsv)"
+          test -n "$name"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "login_server=$(az acr show --name "$name" --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the registry runner rule
+        id: open
+        run: uv run --frozen python scripts/deploy/firewall.py open --target registry --env dev
+
+      - name: Sign in to the registry
+        env:
+          REGISTRY_NAME: ${{ steps.registry.outputs.name }}
+        run: az acr login --name "$REGISTRY_NAME"
+
+      # Before prod's first release no deploy-prod-* tag exists and prod runs nothing to re-scan.
+      - name: Find the images prod runs
+        id: prod-set
+        continue-on-error: true
+        env:
+          REGISTRY_NAME: ${{ steps.registry.outputs.name }}
+          LOGIN_SERVER: ${{ steps.registry.outputs.login_server }}
+        run: |
+          latest="$(git for-each-ref --sort=-creatordate --format '%(refname:short) %(*objectname)' 'refs/tags/deploy-prod-*' | head -n 1)"
+          if [ -z "$latest" ]; then
+            echo "::notice::prod: no deploy-prod-* tag yet, so prod runs no release to re-scan"
+            exit 0
+          fi
+          commit="${latest##* }"
+          if ! printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::prod: ${latest%% *} isn't an annotated tag on a commit"; exit 1
+          fi
+          : > "$RUNNER_TEMP/prod.txt"
+          for image in api ingestion model-stub; do
+            if ! digest="$(az acr manifest show-metadata --registry "$REGISTRY_NAME" --name "docchat/${image}:${commit}" --query digest -o tsv)" \
+                || [ -z "$digest" ]; then
+              echo "::error::prod: docchat/${image}:${commit} has no image tag in the registry"; exit 1
+            fi
+            echo "${LOGIN_SERVER}/docchat/${image}@${digest}" >> "$RUNNER_TEMP/prod.txt"
+          done
+          mkdir -p build/rescan
+          mv "$RUNNER_TEMP/prod.txt" build/rescan/prod.txt
+          echo "prod: the images of ${commit} (${latest%% *})" >> "$GITHUB_STEP_SUMMARY"
+
+      # Pulled by digest while the registry rule is open; scanned once it is closed.
+      - name: Pull the deployed images
+        run: |
+          for environment in dev prod; do
+            list="build/rescan/${environment}.txt"
+            [ -f "$list" ] || continue
+            mkdir -p "build/images/${environment}"
+            while IFS= read -r reference; do
+              image="${reference##*/docchat/}"
+              image="${image%%@*}"
+              docker pull "$reference"
+              # A local tag names the pulled digest for docker save.
+              docker tag "$reference" "docchat-rescan/${environment}-${image}:scan"
+              docker save --output "build/images/${environment}/${image}.tar" "docchat-rescan/${environment}-${image}:scan"
+            done < "$list"
+          done
+
+      - name: Close the registry runner rule
+        if: ${{ always() && steps.open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target registry --env dev
+
+      - name: Scan the deployed images (T-525)
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy-cache"
+          trivy() {
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/work" --workdir /work \
+              --volume "$RUNNER_TEMP/trivy-cache:/cache" \
+              "$TRIVY_IMAGE" --cache-dir /cache "$@"
+          }
+          for environment in dev prod; do
+            [ -d "build/images/${environment}" ] || continue
+            mkdir -p "build/audit/${environment}"
+            for image in api ingestion model-stub; do
+              trivy image --input "build/images/${environment}/${image}.tar" --scanners vuln,secret --severity HIGH,CRITICAL \
+                --format json --exit-code 0 --output "build/audit/${environment}/trivy-${image}.json"
+            done
+          done
+
+      # Each environment's three reports through the gate the build job uses, so a finding the
+      # build would have refused fails here too.
+      - name: Gate the findings (T-525)
+        id: gate
+        continue-on-error: true
+        run: |
+          failed=""
+          for environment in dev prod; do
+            [ -d "build/audit/${environment}" ] || continue
+            echo "## ${environment}" >> "$GITHUB_STEP_SUMMARY"
+            if ! uv run --frozen python scripts/ci/security_gate.py --job build --audit-dir "build/audit/${environment}"; then
+              failed="${failed} ${environment}"
+            fi
+          done
+          echo "failed=${failed# }" >> "$GITHUB_OUTPUT"
+          [ -z "$failed" ]
+
+      # One issue per environment, so a finding keeps one issue across nights: created when none is
+      # open, commented on otherwise.
+      - name: Record each finding as an issue
+        if: ${{ !cancelled() && steps.gate.outcome == 'failure' }}
+        env:
+          FAILED: ${{ steps.gate.outputs.failed }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for environment in $FAILED; do
+            title="Trivy re-scan: high or critical finding in ${environment}"
+            body="$(printf 'Environment: `%s`\nRun: %s\n\nThe findings are in the run summary. No waiver exists at high or critical: follow runbook R17 (Dependency, base-image and tool updates).' "$environment" "$RUN_URL")"
+            number="$(gh issue list --state open --search "\"${title}\" in:title" --json number,title \
+              | jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')"
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+          done
+
+      - name: Fail on a missing set or a finding
+        if: ${{ !cancelled() && (steps.dev-set.outcome == 'failure' || steps.prod-set.outcome == 'failure' || steps.gate.outcome == 'failure') }}
+        run: |
+          echo "::error::a deployed image set couldn't be found or holds a high or critical finding; see the run summary"
+          exit 1
+
+  gitleaks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Scan the full history for secrets (T-526)
+        env:
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+        run: docker run --rm --volume "$GITHUB_WORKSPACE:/repo" "$GITLEAKS_IMAGE" git --redact --verbose /repo
+
+  codeql-dismissals:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: read
+      issues: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Audit the CodeQL dismissals and the waiver expiries
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --frozen python scripts/ci/check_codeql_dismissals.py
+
+      - name: Warn about waivers that expire, and exceptions that fall due, within 14 days
+        run: uv run --frozen python scripts/ci/security_gate.py --waivers-only
+
+  # A load environment whose own teardown never ran (83-infrastructure.md section 10.14; ADR 0126):
+  # once rg-docchat-load's docchat-load-created tag is 6 hours old, the environment is torn down
+  # unless its run is still queued, waiting or in progress and the tag is under 24 hours old,
+  # because the longest load scenarios alone run for up to 700 minutes.
+  load-guard:
+    environment: load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: docchat-env-load
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Sign in to Azure as the load deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Decide whether the load environment is to be torn down
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tags="$(az group show --name rg-docchat-load --query tags -o json)"
+          created="$(jq -r '."docchat-load-created" // ""' <<< "$tags")"
+          run_id="$(jq -r '."docchat-load-run" // ""' <<< "$tags")"
+          teardown=false
+          if [ -n "$created" ]; then
+            age=$(( $(date -u +%s) - $(date -u -d "$created" +%s) ))
+            if [ "$age" -ge 21600 ]; then
+              status="unknown"
+              if printf '%s' "$run_id" | grep -Eq '^[0-9]+$'; then
+                status="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json status -q .status || echo unknown)"
+              fi
+              case "$status" in
+                queued|waiting|in_progress)
+                  if [ "$age" -ge 86400 ]; then teardown=true; fi
+                  ;;
+                *) teardown=true ;;
+              esac
+              echo "load environment of run ${run_id:-unknown}: ${age} s old, run ${status}"
+            fi
+          fi
+          echo "teardown=${teardown}" >> "$GITHUB_OUTPUT"
+
+      - name: Tear down the load environment
+        if: ${{ steps.decide.outputs.teardown == 'true' }}
+        run: uv run --frozen python scripts/deploy/teardown_load.py
