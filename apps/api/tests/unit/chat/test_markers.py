@@ -9,6 +9,7 @@ import pytest
 
 from docchat_api.chat.markers import (
     ANSWER_MAX_CODE_POINTS,
+    PARTIAL_SUFFIX,
     CitationMinter,
     allowed_links,
     delete_reserved,
@@ -80,6 +81,28 @@ def test_t253_a_split_at_every_position_gives_the_unsplit_output(position: int) 
     whole = run(CitationMinter(sources(3)), [ANSWER])
 
     assert run(CitationMinter(sources(3)), [ANSWER[:position], ANSWER[position:]]) == whole
+
+
+@pytest.mark.parametrize(
+    ("suffix", "held"),
+    [
+        ("[", True),
+        ("[ S2 ", True),
+        ("[S1, ", True),
+        ("[S1 ;", True),
+        ("[S1 , , S2 ; S", True),
+        ("[S123", False),
+        ("[S1 S2", False),
+        ("[S1, x", False),
+    ],
+)
+def test_the_partial_suffix_holds_only_the_start_of_a_marker(suffix: str, held: bool) -> None:
+    assert bool(PARTIAL_SUFFIX.match(suffix)) is held
+
+
+def test_the_partial_suffix_refuses_repeated_separators_without_backtracking() -> None:
+    """Each ` ,` once doubled the ways the pattern could fail, so this input never finished."""
+    assert PARTIAL_SUFFIX.match("[S" + " ," * 200 + "x") is None
 
 
 def test_t253_semicolons_leading_zeros_and_repeats() -> None:

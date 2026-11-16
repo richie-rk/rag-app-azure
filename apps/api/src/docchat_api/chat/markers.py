@@ -39,10 +39,12 @@ HTTPS_PREFIX_LENGTH: Final = len("https://")
 
 COMPLETE_MARKER: Final = re.compile(r"\[\s*S(\d{1,2})(?:\s*[,;]\s*S(\d{1,2}))*\s*\]", re.IGNORECASE)
 PARTIAL_SUFFIX: Final = re.compile(
-    r"^\[\s*(?:S\d{0,2}(?:\s*[,;]\s*(?:S\d{0,2})?)*\s*)?$", re.IGNORECASE
+    r"^\[\s*(?:S\d{0,2}(?:\s*[,;](?:\s*S\d{0,2})?)*\s*)?$", re.IGNORECASE
 )
 """Section 11.1's partial suffix with the whitespace the complete marker allows before `]`, so
-`[ S2 ` split from its `]` is held like any other split."""
+`[ S2 ` split from its `]` is held like any other split. It accepts the same strings as that
+pattern with whitespace allowed on both sides of a separator, but no two whitespace runs are
+adjacent, so a suffix that doesn't match is refused without exponential backtracking."""
 _SOURCE_REFERENCE: Final = re.compile(r"S(\d{1,2})", re.IGNORECASE)
 _RESERVED: Final = str.maketrans("", "", CITATION_TOKEN_OPEN + CITATION_TOKEN_CLOSE)
 _TOKEN: Final = re.compile(f"{CITATION_TOKEN_OPEN}\\d+{CITATION_TOKEN_CLOSE}")
