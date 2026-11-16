@@ -1,0 +1,534 @@
+name: deploy-environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "The environment to deploy: dev, prod, or load for a load-test run"
+        type: string
+        required: true
+      api_image:
+        description: "The API image's digest reference, as publish or resolve of a deploy.yaml run on main verified it"
+        type: string
+        required: true
+      ingestion_image:
+        description: "The ingestion image's digest reference, as publish or resolve of a deploy.yaml run on main verified it"
+        type: string
+        required: true
+      model_stub_image:
+        description: "load only: the model stub's digest reference from the release manifest"
+        type: string
+        required: false
+        default: ""
+      web_artifact_run_id:
+        description: "The deploy.yaml run whose web-dist and swa-cli artifacts to deploy"
+        type: string
+        required: true
+      mode:
+        description: "full (provision, then deploy) or images-only (deploy only)"
+        type: string
+        required: true
+      resource_token_salt:
+        description: "load only: run-<GitHub run ID>, so every load run gets new names"
+        type: string
+        required: false
+        default: ""
+      rollback:
+        description: "A deliberate rollback to an earlier release: prod skips its release-ordering check"
+        type: boolean
+        default: false
+    outputs:
+      api_base_url:
+        description: "API_BASE_URL of the deployed environment"
+        value: ${{ jobs.deploy.outputs.api_base_url }}
+      web_base_url:
+        description: "WEB_BASE_URL of the deployed environment"
+        value: ${{ jobs.deploy.outputs.web_base_url }}
+      web_client_id:
+        description: "The web client registration's application ID"
+        value: ${{ jobs.deploy.outputs.web_client_id }}
+      test_client_id:
+        description: "The test client registration's application ID; empty in prod"
+        value: ${{ jobs.deploy.outputs.test_client_id }}
+      api_scope:
+        description: "The API's delegated scope"
+        value: ${{ jobs.deploy.outputs.api_scope }}
+  # Dispatch offers only the two ingestion recovery modes, so a dispatch can never deploy an image
+  # (83-infrastructure.md sections 10.7 and 10.13; runbooks R18 and R33).
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "The environment whose ingestion app to recover"
+        type: choice
+        options: [dev, prod]
+        required: true
+      mode:
+        description: "restart-ingestion (R18 step 2) or reset-task-hub (R33, the last resort)"
+        type: choice
+        options: [restart-ingestion, reset-task-hub]
+        required: true
+
+permissions: {}
+
+jobs:
+  deploy:
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: docchat-env-${{ inputs.environment }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    # Empty when the release-ordering check deployed nothing, so the caller neither tests nor tags.
+    outputs:
+      api_base_url: ${{ steps.public.outputs.api_base_url }}
+      web_base_url: ${{ steps.public.outputs.web_base_url }}
+      web_client_id: ${{ steps.public.outputs.web_client_id }}
+      test_client_id: ${{ steps.public.outputs.test_client_id }}
+      api_scope: ${{ steps.public.outputs.api_scope }}
+    env:
+      DEPLOY_ENV: ${{ inputs.environment }}
+      DEPLOY_MODE: ${{ inputs.mode }}
+      # The recovery modes replace the preflight, provisioning and deployment steps (section 10.13).
+      DEPLOYS_IMAGES: ${{ inputs.mode == 'full' || inputs.mode == 'images-only' }}
+      ROLLBACK: ${{ inputs.rollback == true }}
+      API_IMAGE: ${{ inputs.api_image }}
+      INGESTION_IMAGE: ${{ inputs.ingestion_image }}
+      MODEL_STUB_IMAGE: ${{ inputs.model_stub_image }}
+      RESOURCE_TOKEN_SALT: ${{ inputs.resource_token_salt }}
+      WEB_ARTIFACT_RUN_ID: ${{ inputs.web_artifact_run_id }}
+      # A deploy.yaml dispatch deploys the images of the image_commit it names; a push deploys the
+      # images built from the pushed commit.
+      DISPATCH_IMAGE_COMMIT: ${{ github.event.inputs.image_commit }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      DOCCHAT_OPERATOR_IP_ALLOWLIST: ${{ vars.DOCCHAT_OPERATOR_IP_ALLOWLIST }}
+      DOCCHAT_OPS_ALERT_EMAILS: ${{ vars.DOCCHAT_OPS_ALERT_EMAILS }}
+    steps:
+      - name: Check the inputs
+        id: inputs
+        run: |
+          case "$DEPLOY_MODE" in
+            full|images-only) ;;
+            reset-task-hub|restart-ingestion)
+              case "$DEPLOY_ENV" in
+                dev|prod) exit 0 ;;
+                *) echo "::error::${DEPLOY_MODE} runs only in dev or prod"; exit 1 ;;
+              esac
+              ;;
+            *) echo "::error::unknown mode ${DEPLOY_MODE}"; exit 1 ;;
+          esac
+          case "$DEPLOY_ENV" in
+            dev|prod) ;;
+            load)
+              if ! printf '%s' "$MODEL_STUB_IMAGE" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/docchat/model-stub@sha256:[0-9a-f]{64}$'; then
+                echo "::error::model_stub_image isn't a digest reference in the shared registry"; exit 1
+              fi
+              if ! printf '%s' "$RESOURCE_TOKEN_SALT" | grep -Eq '^run-[0-9]+$'; then
+                echo "::error::resource_token_salt isn't run-<GitHub run ID>"; exit 1
+              fi
+              ;;
+            *) echo "::error::unknown environment ${DEPLOY_ENV}"; exit 1 ;;
+          esac
+          if [ "$DEPLOY_ENV" != "load" ] && { [ -n "$MODEL_STUB_IMAGE" ] || [ -n "$RESOURCE_TOKEN_SALT" ]; }; then
+            echo "::error::model_stub_image and resource_token_salt are for load only"; exit 1
+          fi
+          if ! printf '%s' "$API_IMAGE" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/docchat/api@sha256:[0-9a-f]{64}$'; then
+            echo "::error::api_image isn't a digest reference in the shared registry"; exit 1
+          fi
+          if ! printf '%s' "$INGESTION_IMAGE" | grep -Eq '^[a-z0-9.-]+\.azurecr\.io/docchat/ingestion@sha256:[0-9a-f]{64}$'; then
+            echo "::error::ingestion_image isn't a digest reference in the shared registry"; exit 1
+          fi
+          if ! printf '%s' "$WEB_ARTIFACT_RUN_ID" | grep -Eq '^[0-9]+$'; then
+            echo "::error::web_artifact_run_id isn't a workflow run ID"; exit 1
+          fi
+          commit="${DISPATCH_IMAGE_COMMIT:-$GITHUB_SHA}"
+          if ! printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the release commit isn't 40 hexadecimal characters"; exit 1
+          fi
+          echo "release_sha=${commit}" >> "$GITHUB_OUTPUT"
+
+      # A load run deploys the release of a deploy.yaml run on main: the references and the commit
+      # come from that run's release-manifest, never from the calling workflow's own commit.
+      - name: Download the release manifest of the load run
+        if: ${{ inputs.environment == 'load' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/release
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.web_artifact_run_id }}
+
+      - name: Check the release against its manifest
+        id: release
+        if: ${{ inputs.environment == 'load' }}
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/release/release-manifest.json"
+          for pair in "apiImage:$API_IMAGE" "ingestionImage:$INGESTION_IMAGE" "modelStubImage:$MODEL_STUB_IMAGE"; do
+            if [ "$(jq -r --arg field "${pair%%:*}" '.[$field]' "$manifest")" != "${pair#*:}" ]; then
+              echo "::error::${pair%%:*} differs from the release manifest"; exit 1
+            fi
+          done
+          commit="$(jq -r '.commit' "$manifest")"
+          if ! printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the release manifest's commit isn't 40 hexadecimal characters"; exit 1
+          fi
+          echo "release_sha=${commit}" >> "$GITHUB_OUTPUT"
+
+      # One release commit for every later step: in load the manifest's, elsewhere the input's.
+      - name: Settle the release commit
+        id: commit
+        env:
+          LOAD_RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
+          INPUT_RELEASE_SHA: ${{ steps.inputs.outputs.release_sha }}
+        run: echo "release_sha=${LOAD_RELEASE_SHA:-$INPUT_RELEASE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the repository with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ steps.release.outputs.release_sha || '' }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      # Node.js runs the web client's config generator and the archived CLI; this job installs no
+      # npm package, because it can mint an Azure token.
+      - name: Set up Node.js
+        if: ${{ env.DEPLOYS_IMAGES == 'true' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Set up azd
+        if: ${{ env.DEPLOYS_IMAGES == 'true' }}
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Check the Azure CLI version
+        run: |
+          version="$(az version --query '"azure-cli"' -o tsv)"
+          if [ "$(printf '%s\n%s\n' 2.76.0 "$version" | sort -V | head -n 1)" != "2.76.0" ]; then
+            echo "::error::Azure CLI ${version} is older than 2.76.0"; exit 1
+          fi
+
+      - name: Sign in to Azure as the deploy identity
+        id: login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # No step needs a CLI extension, so none may stall on an install prompt.
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # Operators, who hold only Reader, change the ingestion app only through these two modes.
+      - name: Restart the ingestion app
+        if: ${{ inputs.mode == 'restart-ingestion' }}
+        run: uv run --frozen python scripts/deploy/ingestion_modes.py restart-ingestion --env "$DEPLOY_ENV"
+
+      - name: Reset the Durable task hub
+        if: ${{ inputs.mode == 'reset-task-hub' }}
+        run: uv run --frozen python scripts/deploy/ingestion_modes.py reset-task-hub --env "$DEPLOY_ENV"
+
+      - name: Sign in to azd as the deploy identity
+        if: ${{ env.DEPLOYS_IMAGES == 'true' }}
+        run: azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+
+      - name: Create the azd environment
+        if: ${{ env.DEPLOYS_IMAGES == 'true' }}
+        env:
+          RELEASE_SHA: ${{ steps.commit.outputs.release_sha }}
+        run: |
+          azd env new "$DEPLOY_ENV" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP "$AZURE_RESOURCE_GROUP"
+          azd env set DOCCHAT_API_IMAGE "$API_IMAGE"
+          azd env set DOCCHAT_INGESTION_IMAGE "$INGESTION_IMAGE"
+          azd env set DOCCHAT_MODEL_STUB_IMAGE "$MODEL_STUB_IMAGE"
+          azd env set DOCCHAT_OPERATOR_IP_ALLOWLIST "$DOCCHAT_OPERATOR_IP_ALLOWLIST"
+          azd env set DOCCHAT_OPS_ALERT_EMAILS "$DOCCHAT_OPS_ALERT_EMAILS"
+          azd env set DOCCHAT_RELEASE_SHA "$RELEASE_SHA"
+          azd env set DOCCHAT_RESOURCE_TOKEN_SALT "$RESOURCE_TOKEN_SALT"
+
+      # The nightly load-guard sees every load environment from before its first resource; the
+      # run ID of a called workflow is the calling load-test.yaml run's (section 10.14).
+      - name: Tag the load resource group with the run (T-468)
+        if: ${{ inputs.environment == 'load' && env.DEPLOYS_IMAGES == 'true' }}
+        run: >-
+          az tag update --resource-id "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-docchat-load"
+          --operation Merge --tags "docchat-load-run=${GITHUB_RUN_ID}" "docchat-load-created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          --output none
+
+      - name: Run the preflight (T-434)
+        if: ${{ env.DEPLOYS_IMAGES == 'true' }}
+        run: |
+          uv run --frozen python scripts/preflight/preflight.py --env "$DEPLOY_ENV"
+          azd env set DOCCHAT_PREFLIGHT_DONE true
+
+      - name: Keep the preflight report
+        if: ${{ !cancelled() && env.DEPLOYS_IMAGES == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: preflight-${{ inputs.environment }}
+          path: reports/preflight-${{ inputs.environment }}.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # Release ordering (section 10.11): approving an old queued prod run must not roll prod back.
+      # When prod's release-sha tag names a commit that the run's commit is an older ancestor of,
+      # the job ends successfully without deploying. The first deploy finds no tag; a rollback
+      # skips the check; the same commit deploys again (R23, R24 and R31 re-provision it).
+      - name: Check the release order
+        id: ordering
+        if: ${{ env.DEPLOYS_IMAGES == 'true' }}
+        env:
+          RELEASE_SHA: ${{ steps.commit.outputs.release_sha }}
+        run: |
+          if [ "$DEPLOY_ENV" != "prod" ] || [ "$ROLLBACK" = "true" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          deployed="$(az resource list --resource-group "$AZURE_RESOURCE_GROUP" --tag azd-service-name=api \
+            --query '[0].tags."docchat-release-sha"' -o tsv)"
+          if [ -z "$deployed" ] || [ "$deployed" = "$RELEASE_SHA" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! printf '%s' "$deployed" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the API site's docchat-release-sha tag isn't a commit SHA"; exit 1
+          fi
+          status=0
+          git merge-base --is-ancestor "$RELEASE_SHA" "$deployed" || status=$?
+          case "$status" in
+            0)
+              echo "a newer release is already in prod: ${deployed} is newer than ${RELEASE_SHA}" >> "$GITHUB_STEP_SUMMARY"
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+              ;;
+            1) echo "deploy=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::the release order couldn't be read from the history"; exit 1 ;;
+          esac
+
+      # The postprovision hook runs the migrations, the grants and the chat capacity check (T-124)
+      # inside its own SQL runner rule.
+      - name: Provision (T-124)
+        id: provision
+        if: ${{ inputs.mode == 'full' && steps.ordering.outputs.deploy == 'true' }}
+        run: azd provision --no-prompt
+
+      # Removes a SQL runner rule the hook couldn't close.
+      - name: Sweep the SQL runner rule after provisioning
+        if: ${{ always() && steps.provision.outcome != 'skipped' && steps.login.outcome == 'success' }}
+        run: uv run --frozen python scripts/deploy/firewall.py sweep --target sql --env "$DEPLOY_ENV"
+
+      # The API deploys first, so the web client never calls an operation the running API lacks.
+      # The postdeploy hook verifies the image and the health check, and tags the release.
+      - name: Deploy the API image
+        id: deploy-api
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        run: azd deploy api --from-package "$API_IMAGE" --no-prompt
+
+      # The postdeploy hook verifies the image and the worker start.
+      - name: Deploy the ingestion image
+        id: deploy-ingestion
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        run: azd deploy ingestion --from-package "$INGESTION_IMAGE" --no-prompt
+
+      - name: Refresh the environment's outputs
+        id: refresh
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        run: azd env refresh -e "$DEPLOY_ENV" --no-prompt
+
+      # Public values only, for the callers' later jobs; a run the release-ordering check stopped
+      # publishes nothing, so the caller neither tests nor tags.
+      - name: Publish the environment's public values
+        id: public
+        if: ${{ env.DEPLOYS_IMAGES == 'true' && steps.ordering.outputs.deploy == 'true' }}
+        run: |
+          azd env get-values -e "$DEPLOY_ENV" --output json > "$RUNNER_TEMP/public.json"
+          value() { jq -r --arg key "$1" '.[$key] // ""' "$RUNNER_TEMP/public.json"; }
+          {
+            echo "api_base_url=$(value API_BASE_URL)"
+            echo "web_base_url=$(value WEB_BASE_URL)"
+            echo "web_client_id=$(value WEB_CLIENT_ID)"
+            echo "test_client_id=$(value TEST_CLIENT_ID)"
+            echo "api_scope=$(value API_SCOPE)"
+          } >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/public.json"
+
+      - name: Download the release manifest
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/release-manifest
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.web_artifact_run_id }}
+
+      # The build-once delivery check: each site runs exactly the digest reference that the
+      # release manifest of the deploy.yaml run records.
+      - name: Compare each site's image with the release manifest (T-453)
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        run: |
+          manifest="$RUNNER_TEMP/release-manifest/release-manifest.json"
+          compare() {
+            site="$(azd env get-value "$1" -e "$DEPLOY_ENV")"
+            expected="DOCKER|$(jq -r --arg key "$2" '.[$key]' "$manifest")"
+            actual="$(az webapp config show --resource-group "$AZURE_RESOURCE_GROUP" --name "$site" --query linuxFxVersion -o tsv)"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::${site} runs ${actual}, not the release manifest's ${2}"
+              return 1
+            fi
+          }
+          compare DOCCHAT_API_APP_NAME apiImage
+          compare DOCCHAT_INGESTION_APP_NAME ingestionImage
+          # In load the model stub's site runs the release's third image, set by provisioning.
+          if [ "$DEPLOY_ENV" = "load" ]; then
+            compare DOCCHAT_MODEL_STUB_APP_NAME modelStubImage
+          fi
+
+      - name: Download the web build
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: web-dist
+          path: ${{ runner.temp }}/web-dist
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.web_artifact_run_id }}
+
+      - name: Download the Static Web Apps CLI archive
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: swa-cli
+          path: ${{ runner.temp }}/swa-cli
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.web_artifact_run_id }}
+
+      # After the API, so a web release never calls an operation the running API lacks. The script
+      # writes this environment's config.json and staticwebapp.config.json, reads the deployment
+      # token itself (masked, never stored) and checks /config.json after the upload.
+      - name: Deploy the web client
+        id: web
+        if: ${{ steps.ordering.outputs.deploy == 'true' }}
+        run: >-
+          uv run --frozen python scripts/deploy/deploy_web.py --env "$DEPLOY_ENV"
+          --dist "$RUNNER_TEMP/web-dist" --swa-cli "$RUNNER_TEMP/swa-cli/swa-cli.tgz"
+
+      # The checks below run once the release is deployed: a failure leaves it serving and fails
+      # the run for an operator to investigate (runbook "Incident response"). Each runs whatever
+      # an earlier check found, so one run reports every finding.
+      - name: Run the prod post-deploy checks (T-452, T-023)
+        if: ${{ !cancelled() && inputs.environment == 'prod' && steps.web.outcome == 'success' }}
+        run: uv run --frozen python scripts/deploy/prod_checks.py
+
+      # The prod half of the deployed Azure OpenAI deployment check; dev's half runs in the weekly
+      # deployed infrastructure suite.
+      - name: Check prod's Azure OpenAI deployments and content filters (T-436)
+        if: ${{ !cancelled() && inputs.environment == 'prod' && steps.web.outcome == 'success' }}
+        env:
+          AZURE_ENV_NAME: ${{ inputs.environment }}
+        run: >-
+          uv run --frozen pytest -p no:cacheprovider --deployed
+          "tests/deployed/test_infrastructure.py::test_t436_openai_deployments_and_their_content_filters_follow_the_design"
+
+      - name: app-settings-check
+        if: ${{ !cancelled() && steps.web.outcome == 'success' }}
+        run: uv run --frozen python scripts/deploy/deploy_checks.py app-settings --env "$DEPLOY_ENV"
+
+      # What a provision left: every resource named as section 1.4 says, and the budget's start
+      # date and notifications unchanged.
+      - name: Check the resource names after provisioning (T-437)
+        if: ${{ !cancelled() && steps.provision.outcome == 'success' && steps.refresh.outcome == 'success' }}
+        env:
+          AZURE_ENV_NAME: ${{ inputs.environment }}
+        run: >-
+          uv run --frozen pytest -p no:cacheprovider --deployed
+          "tests/deployed/test_provision_checks.py::test_t437_every_resource_is_named_as_its_pattern_says"
+
+      - name: Check the budget after provisioning (T-472)
+        if: ${{ !cancelled() && steps.provision.outcome == 'success' && steps.refresh.outcome == 'success' }}
+        env:
+          AZURE_ENV_NAME: ${{ inputs.environment }}
+        run: >-
+          uv run --frozen pytest -p no:cacheprovider --deployed
+          "tests/deployed/test_provision_checks.py::test_t472_a_provision_keeps_the_budget_and_its_notifications"
+
+      # The static site serves files only (82-security.md SEC-64): no linked backend, no managed
+      # functions and no custom authentication provider, read through Azure Resource Manager.
+      - name: Check that the Static Web App serves files only (T-475)
+        if: ${{ !cancelled() && steps.provision.outcome == 'success' && steps.refresh.outcome == 'success' }}
+        run: uv run --frozen python scripts/deploy/deploy_checks.py static-site --env "$DEPLOY_ENV"
+
+      - name: Sweep stale SQL runner rules before the grants check
+        id: grants-sweep
+        if: ${{ !cancelled() && steps.refresh.outcome == 'success' && inputs.environment == 'dev' }}
+        run: uv run --frozen python scripts/deploy/firewall.py sweep --target sql --env dev
+
+      - name: Open the SQL runner rule for the grants check
+        id: grants-open
+        if: ${{ !cancelled() && steps.grants-sweep.outcome == 'success' }}
+        run: uv run --frozen python scripts/deploy/firewall.py open --target sql --env dev
+
+      - name: grants-check
+        if: ${{ !cancelled() && steps.grants-open.outcome == 'success' }}
+        run: uv run --frozen python scripts/deploy/deploy_checks.py grants --env dev
+
+      - name: Close the SQL runner rule
+        if: ${{ always() && steps.grants-open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target sql --env dev
+
+      # Every SQL runner rule this job added is in the Activity Log, created and deleted under the
+      # deploy identity, and none is left on the SQL server or the registry.
+      - name: Check the Activity Log for this job's runner rules (T-445)
+        id: runner-rules
+        if: ${{ !cancelled() && steps.grants-open.outcome != 'skipped' }}
+        env:
+          AZURE_ENV_NAME: ${{ inputs.environment }}
+        run: >-
+          uv run --frozen pytest -p no:cacheprovider --deployed
+          "tests/deployed/test_runner_rules.py::test_t445_the_deploy_jobs_runner_rules_are_logged_and_gone"
+
+      - name: Write the job summary
+        if: ${{ !cancelled() && steps.refresh.outcome == 'success' }}
+        env:
+          RELEASE_SHA: ${{ steps.commit.outputs.release_sha }}
+        run: |
+          azd env get-values -e "$DEPLOY_ENV" --output json > "$RUNNER_TEMP/values.json"
+          value() { jq -r --arg key "$1" '.[$key] // ""' "$RUNNER_TEMP/values.json"; }
+          {
+            echo "## Deployed to ${DEPLOY_ENV}"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Environment | ${DEPLOY_ENV} |"
+            echo "| Mode | ${DEPLOY_MODE} |"
+            echo "| Rollback | ${ROLLBACK} |"
+            echo "| Commit | ${RELEASE_SHA} |"
+            echo "| API image | ${API_IMAGE} |"
+            echo "| Ingestion image | ${INGESTION_IMAGE} |"
+            if [ -n "$MODEL_STUB_IMAGE" ]; then echo "| Model stub image | ${MODEL_STUB_IMAGE} |"; fi
+            echo "| API_BASE_URL | $(value API_BASE_URL) |"
+            echo "| WEB_BASE_URL | $(value WEB_BASE_URL) |"
+            echo "| WEB_CLIENT_ID | $(value WEB_CLIENT_ID) |"
+            echo "| TEST_CLIENT_ID | $(value TEST_CLIENT_ID) |"
+            echo "| API_SCOPE | $(value API_SCOPE) |"
+          } >> "$GITHUB_STEP_SUMMARY"

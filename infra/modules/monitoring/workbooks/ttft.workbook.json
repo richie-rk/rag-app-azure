@@ -1,0 +1,177 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "ae5ead71-0339-53ec-88fb-f14ce6792290",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name == \"docchat.chat.turn\" | extend ttft = todouble(Properties[\"docchat.ttft_ms\"]) | where isnotnull(ttft) | summarize p50 = percentile(ttft, 50), p95 = percentile(ttft, 95), p99 = percentile(ttft, 99) by bin(TimeGenerated, 15m)",
+        "size": 0,
+        "title": "Time to first token p50, p95, p99",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "ttft-percentiles"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name == \"docchat.chat.turn\" | extend ttft = todouble(Properties[\"docchat.ttft_ms\"]) | where isnotnull(ttft) | summarize p95 = percentile(ttft, 95), turns = count() by broadened = tostring(Properties[\"docchat.broadened\"])",
+        "size": 0,
+        "title": "p95 with and without a broadened search",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "ttft-broadened"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.chat.turns\" | summarize turns = sum(Sum) by outcome = tostring(Properties[\"outcome\"]), bin(TimeGenerated, 15m)",
+        "size": 0,
+        "title": "Turns by outcome",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "turns-by-outcome"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let b = AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.chat.broadened_searches\" | summarize broadened = sum(Sum) by bin(TimeGenerated, 1h); AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.chat.turns\" | summarize turns = sum(Sum) by bin(TimeGenerated, 1h) | join kind=leftouter b on TimeGenerated | extend ratePct = round(100.0 * coalesce(broadened, 0.0) / turns, 1) | project TimeGenerated, ratePct",
+        "size": 0,
+        "title": "Broadened-search rate",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "broadened-rate"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name in (\"docchat.chat.prestream\", \"docchat.chat.rewrite\", \"docchat.chat.embed\", \"docchat.chat.search\", \"docchat.chat.screen\", \"docchat.chat.assemble\", \"docchat.chat.generate\", \"docchat.chat.persist\") | summarize p95 = percentile(DurationMs, 95) by Name",
+        "size": 0,
+        "title": "Pipeline step p95",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "pipeline-step-p95"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.search.duration\" | summarize meanMs = sum(Sum) / sum(ItemCount), maxMs = max(Max) by pass = tostring(Properties[\"pass\"])",
+        "size": 0,
+        "title": "Search latency mean and maximum",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "search-latency"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.chat.prompt.dropped\", \"docchat.chat.heartbeats\", \"docchat.search.rerank_partial\") | summarize n = sum(Sum) by Name, kind = tostring(Properties[\"kind\"]), bin(TimeGenerated, 1h)",
+        "size": 0,
+        "title": "Prompt drops, heartbeats and partial reranks",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "prompt-drops-heartbeats-reranks"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

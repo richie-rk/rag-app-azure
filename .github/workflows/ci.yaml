@@ -1,0 +1,918 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      # T-512 is the lint job as a whole: the locked install, every pre-commit hook (the uv-lock hook
+      # runs uv lock --locked; Ruff with S608 and mypy run as hooks) and the checks after them.
+      - name: Install the workspace from the lockfile (T-512)
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      # pre-commit's web hooks run the web packages' own scripts. A package is installed once it
+      # exists, so this job doesn't depend on the order in which the two arrive.
+      - name: Install the web packages from their lockfiles
+        run: |
+          for package in apps/web tests/e2e; do
+            if [ -f "$package/package.json" ]; then
+              npm ci --prefix "$package"
+            fi
+          done
+
+      - name: Run every pre-commit hook (T-512)
+        run: uv run --frozen pre-commit run --all-files --show-diff-on-failure
+
+      - name: Check for forbidden tracked files
+        run: uv run --frozen python scripts/ci/check_forbidden_files.py
+
+      - name: Check outbound clients
+        run: uv run --frozen python scripts/ci/check_outbound_clients.py
+
+      - name: Check the untyped-imports override
+        run: uv run --frozen python scripts/ci/check_mypy_untyped.py
+
+      - name: Check the import contracts (T-513)
+        run: uv run --frozen lint-imports
+
+      - name: Check the unit-test layout
+        run: uv run --frozen python scripts/ci/check_test_layout.py
+
+      - name: Check the k6 lock against its release's checksums
+        run: uv run --frozen python scripts/ci/check_k6_lock.py
+
+      # The binary the load generator runs, verified against the lock before it runs here.
+      - name: Install k6 from the lock
+        run: |
+          set -euo pipefail
+          lock=tests/load/k6.lock.json
+          url="$(jq -r '.url' "$lock")"
+          sha256="$(jq -r '.sha256' "$lock")"
+          member="$(jq -r '.member' "$lock")"
+          curl --fail --silent --show-error --location --proto '=https' --retry 3 --output "$RUNNER_TEMP/k6.tar.gz" "$url"
+          echo "${sha256}  ${RUNNER_TEMP}/k6.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/k6"
+          tar --extract --gzip --file "$RUNNER_TEMP/k6.tar.gz" --directory "$RUNNER_TEMP/k6" --strip-components 1 "$member"
+
+      - name: Inspect each load scenario
+        run: |
+          set -euo pipefail
+          for scenario in s1-event-loop s2-stateless s3-calibrate s3-scaleout; do
+            "$RUNNER_TEMP/k6/k6" inspect "tests/load/k6/${scenario}.js" > /dev/null
+          done
+
+      # T-581: one retry after retryAfterSeconds on the two limit codes, none on any other 429.
+      - name: Run the k6 library self-test (T-581)
+        run: |
+          set -euo pipefail
+          uv run --frozen python scripts/ci/k6_selftest_server.py > "$RUNNER_TEMP/k6-selftest-server.log" &
+          server=$!
+          trap 'kill "$server"' EXIT
+          url=""
+          for _ in $(seq 1 100); do
+            url="$(sed -n 's/^K6_SELFTEST_SERVER_READY //p' "$RUNNER_TEMP/k6-selftest-server.log")"
+            if [ -n "$url" ]; then break; fi
+            sleep 0.2
+          done
+          if [ -z "$url" ]; then
+            echo "::error::the k6 self-test server didn't start"; exit 1
+          fi
+          K6_SELFTEST_URL="$url" "$RUNNER_TEMP/k6/k6" run --quiet tests/load/k6/selftest.js
+
+      # The scenarios' arrival profiles and thresholds against section 7.6, read with k6 inspect.
+      - name: Check the load scenarios' options
+        env:
+          DOCCHAT_K6: ${{ runner.temp }}/k6/k6
+        run: uv run --frozen pytest tests/support/tests/load/test_k6_scripts.py -p no:cacheprovider
+
+  python-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      # Each job generates its own SQL Server password, the same way a developer's machine does.
+      - name: Write the local .env
+        run: |
+          uv run --frozen docchat-ops --env local local init
+          password="$(sed -n 's/^DOCCHAT_LOCAL_SQL_SA_PASSWORD=//p' .env)"
+          echo "::add-mask::${password}"
+          echo "DOCCHAT_LOCAL_SQL_SA_PASSWORD=${password}" >> "$GITHUB_ENV"
+
+      # T-520 is the python-tests job as a whole: the services, then the suites as a developer runs them.
+      - name: Start the compose services (T-520)
+        run: docker compose up -d --wait
+
+      - name: Run the unit and integration suites with coverage (T-520)
+        run: >-
+          uv run --frozen pytest
+          --cov=docchat_core --cov=docchat_api --cov=docchat_ingestion --cov=docchat_ops --cov=docchat_model_stub
+          --cov-branch --junitxml=reports/pytest.xml
+
+      # Every package is reported, and each one below its threshold is named (84-testing.md section 10.4).
+      - name: Check the per-package coverage thresholds (T-519)
+        run: |
+          failed=0
+          check() {
+            if ! uv run --frozen coverage report --include="$2/*" --fail-under="$3"; then
+              echo "::error::$1 coverage is below its threshold of $3%"
+              failed=1
+            fi
+          }
+          check docchat_core packages/core/src/docchat_core 90
+          check docchat_api apps/api/src/docchat_api 85
+          check docchat_ingestion apps/ingestion/src/docchat_ingestion 85
+          check docchat_ops scripts/ops/src/docchat_ops 80
+          check docchat_model_stub tests/model-stub/src/docchat_model_stub 80
+          exit "$failed"
+
+      - name: Stop the compose services
+        if: always()
+        run: docker compose down -v
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Install the web client from its lockfile
+        run: npm ci
+
+      - name: Lint with no warnings allowed (T-384)
+        run: npm run lint
+
+      - name: Type-check (T-415)
+        run: npm run typecheck
+
+      - name: Check the formatting
+        run: npm run format:check
+
+      # vitest run --coverage, which fails under the thresholds and the module floors, naming each
+      # metric below its threshold (T-519).
+      - name: Run the unit and component tests with coverage (T-519)
+        run: npm test
+
+      # The build ends with check-dist.mjs, the build-output gate.
+      - name: Build the web client and check its output
+        run: npm run build
+
+      - name: Regenerate the API types, schemas and limits
+        run: npm run generate:api
+
+      # git diff ignores untracked files, so an output that was never committed is caught separately.
+      - name: Check the generated files for drift (T-345)
+        run: |
+          git diff --exit-code -- src/api/generated
+          untracked="$(git ls-files --others --exclude-standard -- src/api/generated)"
+          if [ -n "$untracked" ]; then
+            echo "::error::generated web files aren't committed: ${untracked}"
+            exit 1
+          fi
+
+      # The browser tests run against this same unconfigured build.
+      - name: Keep the build for the browser tests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: web-dist
+          path: apps/web/dist/
+          if-no-files-found: error
+
+  # The browser suites (84-testing.md sections 2.13 and 10.1): specs/web/ on the four Playwright
+  # projects against the web job's shipped build, configured by the web client's generator and
+  # served by the pinned Static Web Apps CLI, with the stub API and stub identity provider.
+  e2e:
+    needs: web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: tests/e2e
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Install the browser-test package from its lockfile
+        run: npm ci
+
+      - name: Check the browser suites' formatting
+        run: npm run format:check
+
+      - name: Lint the browser suites with no warnings allowed
+        run: npm run lint
+
+      - name: Type-check the browser suites
+        run: npm run typecheck
+
+      # site.ts copies this build, writes its config.json and staticwebapp.config.json with the web
+      # client's generator and serves the copy.
+      - name: Download the web build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: web-dist
+          path: apps/web/dist
+
+      # Edge is a system browser that the runner image may already hold, so it is reinstalled.
+      - name: Install the browsers of the four projects
+        run: |
+          npx --no-install playwright install --with-deps chromium firefox webkit
+          npx --no-install playwright install --force msedge
+
+      # CI is set, so the configuration retries a failed test once and refuses test.only.
+      - name: Run the browser suites on the four projects
+        run: npx --no-install playwright test specs/web/
+
+      - name: Keep the traces of failed specs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: e2e-results
+          path: tests/e2e/test-results/
+          if-no-files-found: ignore
+
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # check_contract_enums.py compares the document with the base branch's.
+      - name: Check out the pull request with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      # Until apps/web exists, the drift check covers the API's document alone.
+      - name: Set up Node.js
+        if: ${{ hashFiles('apps/web/package.json') != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Install the web client from its lockfile
+        if: ${{ hashFiles('apps/web/package.json') != '' }}
+        run: npm ci --prefix apps/web
+
+      - name: Export the OpenAPI document (T-042)
+        run: uv run --frozen --package docchat-api python -m docchat_api.openapi --output apps/api/openapi.json
+
+      - name: Generate the web client's types and schemas (T-042)
+        if: ${{ hashFiles('apps/web/package.json') != '' }}
+        run: npm --prefix apps/web run generate:api
+
+      # git diff ignores untracked files, so an output that was never committed is caught separately.
+      - name: Check the committed contract for drift (T-042)
+        run: |
+          git diff --exit-code -- apps/api/openapi.json apps/web/src/api/generated
+          untracked="$(git ls-files --others --exclude-standard -- apps/api/openapi.json apps/web/src/api/generated)"
+          if [ -n "$untracked" ]; then
+            echo "::error::generated contract files aren't committed: ${untracked}"
+            exit 1
+          fi
+
+      - name: Check that response enumerations evolve client first (T-042)
+        run: uv run --frozen python scripts/ci/check_contract_enums.py
+
+  migrations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      deployments: read
+    env:
+      DOCCHAT_LOCAL_EMULATORS: "true"
+      DOCCHAT_CORE_ENVIRONMENT: local
+      DOCCHAT_SQL_DATABASE: docchat
+    steps:
+      # check_migrations.py reads earlier revisions from the commit of the latest prod deployment.
+      - name: Check out the pull request with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Write the local .env
+        run: |
+          uv run --frozen docchat-ops --env local local init
+          password="$(sed -n 's/^DOCCHAT_LOCAL_SQL_SA_PASSWORD=//p' .env)"
+          echo "::add-mask::${password}"
+          echo "DOCCHAT_LOCAL_SQL_SA_PASSWORD=${password}" >> "$GITHUB_ENV"
+
+      - name: Start SQL Server
+        run: docker compose up -d --wait sqlserver
+
+      - name: Create the empty database
+        run: >-
+          docker compose exec -T sqlserver sh -c
+          '/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" -b -Q "CREATE DATABASE docchat"'
+
+      - name: Assert exactly one Alembic head
+        run: |
+          heads="$(uv run --frozen --package docchat-db alembic -c db/alembic.ini heads)"
+          printf '%s\n' "$heads"
+          test "$(printf '%s\n' "$heads" | grep -c '(head)')" -eq 1
+
+      - name: Upgrade the empty database to head
+        run: uv run --frozen --package docchat-db alembic -c db/alembic.ini upgrade head
+
+      - name: Compare the metadata with the migrated schema
+        run: uv run --frozen --package docchat-db alembic -c db/alembic.ini check
+
+      - name: Check new revisions for destructive operations
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --frozen python scripts/ci/check_migrations.py
+
+      - name: Stop SQL Server
+        if: always()
+        run: docker compose down -v
+
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # gitleaks reads the pull request's whole commit range.
+      - name: Check out the pull request with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Create the audit directory
+        run: mkdir -p build/audit
+
+      # Exit code 1 means findings were reported, which the gate judges; any other failure is a tool failure.
+      - name: Audit the Python dependencies
+        run: |
+          uv export --locked --all-packages --all-groups --no-emit-workspace --format requirements-txt -o build/audit/requirements.txt
+          uv run --frozen pip-audit --strict --disable-pip --require-hashes -r build/audit/requirements.txt --vulnerability-service osv --format json -o build/audit/pip-audit.json || test $? -eq 1
+
+      # npm audit reads each package's lockfile, so nothing is installed. A package is audited once
+      # it exists, as the gate expects its report (npm-<last path component>.json); exit code 1
+      # means findings, which the gate judges, and an error object in the report fails the gate.
+      - name: Audit the npm packages
+        run: |
+          for package in apps/web tests/e2e scripts/deploy/swa-cli; do
+            if [ -f "$package/package.json" ]; then
+              (cd "$package" && npm audit --json > "$GITHUB_WORKSPACE/build/audit/npm-${package##*/}.json") || test $? -eq 1
+            fi
+          done
+
+      # High findings fail the gate; medium ones need a waiver (T-529).
+      - name: Lint the workflows (T-529)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --frozen zizmor --format json --min-severity medium --no-exit-codes .github/workflows > build/audit/zizmor.json
+
+      # deptry reads the manifest and first-party names from its working directory, so it runs inside
+      # each member against that member's own pyproject.toml; exit code 1 means findings, which the
+      # gate judges.
+      - name: Check each member's declared dependencies
+        run: |
+          for member in packages/core apps/api apps/ingestion db scripts/ops tests/support tests/model-stub; do
+            source=src
+            [ -d "$member/src" ] || source=.
+            (cd "$member" && uv run --frozen deptry "$source" --json-output "$GITHUB_WORKSPACE/build/audit/deptry-${member##*/}.json") || test $? -eq 1
+          done
+
+      # Any gitleaks finding fails the job; no finding can be waived.
+      - name: Scan the pull request's commits for secrets (T-526)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo" "$GITLEAKS_IMAGE"
+          git --redact --verbose --log-opts="${BASE_SHA}..${HEAD_SHA}" /repo
+
+      - name: Gate the findings
+        run: uv run --frozen python scripts/ci/security_gate.py --job security
+
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ github.sha }}
+      REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      # Each Dockerfile's last RUN is the image's smoke step under --network=none, so a build that
+      # completes has passed it.
+      - name: Build the images without pushing (T-523)
+        run: |
+          build() {
+            docker buildx build --platform linux/amd64 \
+              --file "$2" \
+              --build-arg "DOCCHAT_BUILD_COMMIT=${COMMIT}" \
+              --label "org.opencontainers.image.revision=${COMMIT}" \
+              --label "org.opencontainers.image.source=${REPOSITORY_URL}" \
+              --tag "docchat/$1:${COMMIT}" --load .
+          }
+          build api apps/api/Dockerfile
+          build ingestion apps/ingestion/Dockerfile
+          build model-stub tests/model-stub/Dockerfile
+
+      # Gunicorn must be process 1 in exec form with no entrypoint, so it receives the platform's
+      # stop signal itself (01-repository.md section 4.7; ADR 0007).
+      - name: Inspect the image configuration (T-523)
+        run: |
+          inspect() { docker image inspect --format "$2" "docchat/$1:${COMMIT}"; }
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$(inspect api '{{json .Config.Cmd}}')" = '["gunicorn","--config","/app/gunicorn.conf.py","docchat_api.app:create_app()"]' ] \
+            || fail "docchat/api's Config.Cmd isn't the exec-form Gunicorn command"
+          case "$(inspect api '{{json .Config.Entrypoint}}')" in
+            null|'[]') ;;
+            *) fail "docchat/api has an entrypoint" ;;
+          esac
+          [ "$(inspect api '{{.Config.User}}')" = "10001:10001" ] || fail "docchat/api doesn't run as 10001:10001"
+          [ "$(inspect model-stub '{{.Config.User}}')" = "10001:10001" ] || fail "docchat/model-stub doesn't run as 10001:10001"
+          for image in api ingestion model-stub; do
+            if docker image inspect --format '{{json .Config.Env}}' "docchat/${image}:${COMMIT}" | grep -q 'PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY'; then
+              echo "::error::docchat/${image} sets PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY"
+              exit 1
+            fi
+          done
+
+      # A test file, a source map, .env or .azure/ in an image could only come from the build
+      # context, which the root .dockerignore keeps them out of.
+      - name: Check that no image holds a test file, a source map, .env or .azure/ (T-523)
+        run: |
+          for image in api ingestion model-stub; do
+            container="$(docker create "docchat/${image}:${COMMIT}")"
+            docker export "$container" | uv run --frozen python scripts/ci/check_image_contents.py --image "docchat/${image}"
+            docker rm "$container" > /dev/null
+          done
+
+      # The ingestion image's build already ran its offline self-check, the isolation probe and the
+      # readable-files check as its last step (14-ingestion.md section 15.2); this reads the built
+      # image back, so a later Dockerfile change that drops a package, user, mode or pin fails here.
+      # The compiler-package pattern lets exactly gcc-12-base through: it holds only GCC's
+      # documentation, and libgcc-s1, libstdc++6 and libgomp1 depend on it (84-testing.md T-194).
+      - name: Check the ingestion image's packages, users and file modes (T-194)
+        run: |
+          cat > "$RUNNER_TEMP/check-ingestion.sh" <<'EOF'
+          set -u
+          failed=0
+          fail() { echo "::error::docchat/ingestion: $1"; failed=1; }
+          installed() { dpkg-query --show --showformat='${Status} ${Version}' "$1" 2>/dev/null; }
+          for package in msodbcsql18 libseccomp2 procps; do
+            installed "$package" | grep -q '^install ok installed ' || fail "$package isn't installed"
+          done
+          for package in libreoffice-core-nogui libreoffice-writer-nogui libreoffice-impress-nogui; do
+            [ "$(installed "$package")" = "install ok installed 4:7.4.7-1+deb12u14" ] || fail "$package isn't 4:7.4.7-1+deb12u14"
+          done
+          for package in fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation2; do
+            installed "$package" | grep -q '^install ok installed ' || fail "$package isn't installed"
+          done
+          ls /opt/microsoft/msodbcsql18/lib64/libmsodbcsql-18.*.so.* > /dev/null 2>&1 || fail "ODBC Driver 18's library is missing"
+          for compiler in gcc cc c++ g++ clang; do
+            if command -v "$compiler" > /dev/null 2>&1; then fail "the compiler $compiler is present"; fi
+          done
+          compilers="$(dpkg-query --show --showformat='${Package} ${Status}\n' 2>/dev/null \
+            | grep -E '^(gcc|g\+\+|cpp|clang)[^ ]* install ok installed' | grep -v '^gcc-12-base ')"
+          [ -z "$compilers" ] || fail "a compiler package is installed: $(echo "$compilers" | cut -d ' ' -f 1 | tr '\n' ' ')"
+          if find / -xdev -iname 'nvidia*' -path '*site-packages*' -print -quit 2>/dev/null | grep -q .; then
+            fail "an nvidia-* distribution is installed"
+          fi
+          for n in $(seq 0 15); do
+            id=$((10002 + n))
+            [ "$(id -u "docchat-parse-$n" 2>/dev/null)" = "$id" ] || fail "docchat-parse-$n hasn't UID $id"
+            [ "$(id -g "docchat-parse-$n" 2>/dev/null)" = "$id" ] || fail "docchat-parse-$n hasn't GID $id"
+            [ "$(stat -c '%U %G %a' "/run/docchat-parse/$id.lock" 2>/dev/null)" = "root root 600" ] \
+              || fail "/run/docchat-parse/$id.lock isn't owned by root with mode 0600"
+          done
+          [ "$(stat -c '%U %a' /run/docchat-scratch 2>/dev/null)" = "root 711" ] || fail "/run/docchat-scratch isn't owned by root with mode 0711"
+          writable="$(find / -xdev \( -type d -o -type f \) -perm -0002 -not -path /tmp -not -path /var/tmp 2>/dev/null)"
+          [ -z "$writable" ] || fail "writable by others: $(echo "$writable" | head -5 | tr '\n' ' ')"
+          ls /var/cache/fontconfig/*.cache-* > /dev/null 2>&1 || fail "no font cache built by fc-cache"
+          if find /usr/lib/libreoffice -name 'libupdchklo.so' -print -quit 2>/dev/null | grep -q .; then
+            fail "libupdchklo.so is present under /usr/lib/libreoffice"
+          fi
+          python3 -I -c "import pathlib, sys
+          root = pathlib.Path('/FuncExtensionBundles/Microsoft.Azure.Functions.ExtensionBundle')
+          names = [entry.name.split('.') for entry in root.iterdir() if entry.is_dir()]
+          versions = [tuple(int(part) for part in name) for name in names if all(part.isdigit() for part in name)]
+          sys.exit(not any((4, 39, 1) <= version < (5, 0, 0) for version in versions))" || fail "no extension bundle in [4.39.1, 5.0.0)"
+          exit "$failed"
+          EOF
+          docker run --rm --network none --entrypoint /bin/bash \
+            --volume "$RUNNER_TEMP/check-ingestion.sh:/check-ingestion.sh:ro" \
+            "docchat/ingestion:${COMMIT}" /check-ingestion.sh
+
+      # Every layer of every image, for vulnerabilities and secrets; nightly's trivy-rescan repeats
+      # this on the images dev and prod run.
+      - name: Scan the images and the Dockerfiles (T-525)
+        run: |
+          mkdir -p build/images build/audit "$RUNNER_TEMP/trivy-cache"
+          trivy() {
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/work" --workdir /work \
+              --volume "$RUNNER_TEMP/trivy-cache:/cache" \
+              "$TRIVY_IMAGE" --cache-dir /cache "$@"
+          }
+          for image in api ingestion model-stub; do
+            docker save --output "build/images/${image}.tar" "docchat/${image}:${COMMIT}"
+            trivy image --input "build/images/${image}.tar" --scanners vuln,secret --severity HIGH,CRITICAL \
+              --format json --exit-code 0 --output "build/audit/trivy-${image}.json"
+          done
+          trivy config --misconfig-scanners dockerfile --skip-dirs .venv,build --severity HIGH,CRITICAL \
+            --format json --exit-code 0 --output build/audit/trivy-config.json .
+
+      - name: Gate the findings (T-525)
+        run: uv run --frozen python scripts/ci/security_gate.py --job images
+
+  infra-validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      # Representative digest references: what the templates validate is the reference's shape.
+      DOCCHAT_API_IMAGE_CURRENT: crdocchatci0000.azurecr.io/docchat/api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      DOCCHAT_INGESTION_IMAGE_CURRENT: crdocchatci0000.azurecr.io/docchat/ingestion@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      # PSRule expands the templates with the bicep on PATH, so it gets the pinned CLI too.
+      - name: Install Bicep CLI 0.47.16
+        run: |
+          az bicep install --version v0.47.16
+          echo "${HOME}/.azure/bin" >> "$GITHUB_PATH"
+
+      - name: Set the budget start date
+        run: echo "DOCCHAT_BUDGET_START_DATE=$(date -u +%Y-%m-01)" >> "$GITHUB_ENV"
+
+      - name: Build the templates and the parameters of every environment (T-421)
+        id: build
+        env:
+          LOAD_RESOURCE_TOKEN_SALT: run-${{ github.run_id }}
+          LOAD_MODEL_STUB_IMAGE: crdocchatci0000.azurecr.io/docchat/model-stub@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          mkdir -p build/infra
+          az bicep build --file infra/main.bicep --outdir build/infra
+          az bicep build --file infra/shared.bicep --outdir build/infra
+          AZURE_ENV_NAME=dev az bicep build-params --file infra/main.bicepparam --outfile build/infra/main.dev.parameters.json
+          AZURE_ENV_NAME=prod az bicep build-params --file infra/main.bicepparam --outfile build/infra/main.prod.parameters.json
+          AZURE_ENV_NAME=load DOCCHAT_RESOURCE_TOKEN_SALT="$LOAD_RESOURCE_TOKEN_SALT" DOCCHAT_MODEL_STUB_IMAGE_CURRENT="$LOAD_MODEL_STUB_IMAGE" \
+            az bicep build-params --file infra/main.bicepparam --outfile build/infra/main.load.parameters.json
+
+      - name: Lint every Bicep file (T-421)
+        run: git ls-files -z -- '*.bicep' | xargs -0 -n1 az bicep lint --file
+
+      - name: Check the module pins and API versions
+        run: uv run --frozen python scripts/ci/check_bicep_modules.py build/infra/main.json build/infra/shared.json
+
+      - name: Run PSRule for dev (T-423)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: microsoft/ps-rule@46451b8f5258c41beb5ae69ed7190ccbba84112c  # v2.9.0
+        env:
+          AZURE_ENV_NAME: dev
+        with:
+          modules: PSRule.Rules.Azure
+          baseline: Azure.GA_2025_12
+          inputType: repository
+          outputFormat: Sarif
+          outputPath: reports/ps-rule-dev.sarif
+
+      - name: Run PSRule for prod (T-423)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: microsoft/ps-rule@46451b8f5258c41beb5ae69ed7190ccbba84112c  # v2.9.0
+        env:
+          AZURE_ENV_NAME: prod
+        with:
+          modules: PSRule.Rules.Azure
+          baseline: Azure.GA_2025_12
+          inputType: repository
+          outputFormat: Sarif
+          outputPath: reports/ps-rule-prod.sarif
+
+      - name: Run PSRule for load (T-423)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: microsoft/ps-rule@46451b8f5258c41beb5ae69ed7190ccbba84112c  # v2.9.0
+        env:
+          AZURE_ENV_NAME: load
+          DOCCHAT_RESOURCE_TOKEN_SALT: run-${{ github.run_id }}
+          DOCCHAT_MODEL_STUB_IMAGE_CURRENT: crdocchatci0000.azurecr.io/docchat/model-stub@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        with:
+          modules: PSRule.Rules.Azure
+          baseline: Azure.GA_2025_12
+          inputType: repository
+          outputFormat: Sarif
+          outputPath: reports/ps-rule-load.sarif
+
+      - name: Upload the dev PSRule results to code scanning (T-423)
+        if: ${{ !cancelled() && hashFiles('reports/ps-rule-dev.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
+        with:
+          sarif_file: reports/ps-rule-dev.sarif
+          category: ps-rule-dev
+
+      - name: Upload the prod PSRule results to code scanning (T-423)
+        if: ${{ !cancelled() && hashFiles('reports/ps-rule-prod.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
+        with:
+          sarif_file: reports/ps-rule-prod.sarif
+          category: ps-rule-prod
+
+      - name: Upload the load PSRule results to code scanning (T-423)
+        if: ${{ !cancelled() && hashFiles('reports/ps-rule-load.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
+        with:
+          sarif_file: reports/ps-rule-load.sarif
+          category: ps-rule-load
+
+      - name: Keep the PSRule reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ps-rule-reports
+          path: reports/ps-rule-*.sarif
+          if-no-files-found: ignore
+
+  preflight-whatif:
+    # Fork pull requests get no OIDC token; a maintainer re-runs such a change from a branch of this repository.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_ENV_NAME: dev
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      DEV_SUBSCRIPTION_ID: ${{ vars.DOCCHAT_DEV_SUBSCRIPTION_ID }}
+      REPRESENTATIVE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the pull-request identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.DOCCHAT_PR_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.DOCCHAT_DEV_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Run the preflight against dev (T-434)
+        env:
+          DOCCHAT_OPERATOR_IP_ALLOWLIST: ${{ vars.DOCCHAT_DEV_OPERATOR_IP_ALLOWLIST }}
+        run: uv run --frozen python scripts/preflight/preflight.py --env dev
+
+      - name: Keep the preflight report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: preflight-dev
+          path: reports/preflight-dev.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # What-if must see the images dev runs now; before dev's first provision a site doesn't exist,
+      # and a representative reference of the same shape stands in.
+      - name: Read the current dev image references and budget start date
+        run: |
+          current_image() {
+            name="$(az resource list --resource-group rg-docchat-dev --tag "azd-service-name=$1" --query '[0].name' -o tsv)"
+            if [ -n "$name" ]; then
+              az webapp config show --resource-group rg-docchat-dev --name "$name" --query linuxFxVersion -o tsv | sed 's/^DOCKER|//'
+            else
+              echo "crdocchatci0000.azurecr.io/docchat/$1@${REPRESENTATIVE_DIGEST}"
+            fi
+          }
+          echo "DOCCHAT_API_IMAGE_CURRENT=$(current_image api)" >> "$GITHUB_ENV"
+          echo "DOCCHAT_INGESTION_IMAGE_CURRENT=$(current_image ingestion)" >> "$GITHUB_ENV"
+          budget_url="https://management.azure.com/subscriptions/${DEV_SUBSCRIPTION_ID}/resourceGroups/rg-docchat-dev/providers/Microsoft.Consumption/budgets/budget-docchat-dev?api-version=2026-06-01"
+          if start="$(az rest --method get --url "$budget_url" --query properties.timePeriod.startDate -o tsv 2> "$RUNNER_TEMP/budget.err")"; then
+            echo "DOCCHAT_BUDGET_START_DATE=${start:0:10}" >> "$GITHUB_ENV"
+          elif grep -q 'Not Found' "$RUNNER_TEMP/budget.err"; then
+            echo "DOCCHAT_BUDGET_START_DATE=$(date -u +%Y-%m-01)" >> "$GITHUB_ENV"
+          else
+            cat "$RUNNER_TEMP/budget.err" >&2
+            exit 1
+          fi
+
+      - name: Run what-if against dev and shared (T-431)
+        run: |
+          mkdir -p build/whatif
+          az deployment group what-if --resource-group rg-docchat-dev \
+            --template-file infra/main.bicep --parameters infra/main.bicepparam \
+            --validation-level ProviderNoRbac --no-pretty-print --output json > build/whatif/main.json
+          az deployment group what-if --resource-group rg-docchat-shared \
+            --template-file infra/shared.bicep --parameters infra/shared.bicepparam \
+            --validation-level ProviderNoRbac --no-pretty-print --output json > build/whatif/shared.json
+
+      - name: Summarise the changes
+        run: uv run --frozen python scripts/ci/whatif_summary.py build/whatif/main.json build/whatif/shared.json
+
+      # The pull-request identity holds no deployments/write, so each attempt must be refused with
+      # AuthorizationFailed; the template is empty, so a deployment that wrongly succeeds changes nothing.
+      - name: pr-write-refused (T-432)
+        id: pr-write-refused
+        run: |
+          template="$RUNNER_TEMP/empty.json"
+          cat > "$template" <<'EOF'
+          {"$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#", "contentVersion": "1.0.0.0", "resources": []}
+          EOF
+          failed=0
+          for group in rg-docchat-dev rg-docchat-shared; do
+            if az deployment group create --resource-group "$group" --name "pr-write-refused-${GITHUB_RUN_ID}" \
+                --template-file "$template" > /dev/null 2> "$RUNNER_TEMP/${group}.err"; then
+              echo "The pull-request identity created deployment pr-write-refused-${GITHUB_RUN_ID} in ${group}." >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+            elif ! grep -q 'AuthorizationFailed' "$RUNNER_TEMP/${group}.err"; then
+              cat "$RUNNER_TEMP/${group}.err" >&2
+              echo "The deployment in ${group} failed with an error other than AuthorizationFailed." >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  infra-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      DOCCHAT_API_IMAGE_CURRENT: crdocchatci0000.azurecr.io/docchat/api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      DOCCHAT_INGESTION_IMAGE_CURRENT: crdocchatci0000.azurecr.io/docchat/ingestion@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Install Bicep CLI 0.47.16
+        run: az bicep install --version v0.47.16
+
+      - name: Compile the templates and the parameters of every environment
+        env:
+          LOAD_RESOURCE_TOKEN_SALT: run-${{ github.run_id }}
+          LOAD_MODEL_STUB_IMAGE: crdocchatci0000.azurecr.io/docchat/model-stub@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          mkdir -p build/infra/bootstrap build/infra/load
+          export DOCCHAT_BUDGET_START_DATE="$(date -u +%Y-%m-01)"
+          az bicep build --file infra/main.bicep --outdir build/infra
+          az bicep build --file infra/shared.bicep --outdir build/infra
+          for template in infra/bootstrap/*.bicep; do
+            az bicep build --file "$template" --outdir build/infra/bootstrap
+          done
+          az bicep build --file tests/load/aci/loadgen.bicep --outdir build/infra/load
+          AZURE_ENV_NAME=dev az bicep build-params --file infra/main.bicepparam --outfile build/infra/main.dev.parameters.json
+          AZURE_ENV_NAME=prod az bicep build-params --file infra/main.bicepparam --outfile build/infra/main.prod.parameters.json
+          AZURE_ENV_NAME=load DOCCHAT_RESOURCE_TOKEN_SALT="$LOAD_RESOURCE_TOKEN_SALT" DOCCHAT_MODEL_STUB_IMAGE_CURRENT="$LOAD_MODEL_STUB_IMAGE" \
+            az bicep build-params --file infra/main.bicepparam --outfile build/infra/main.load.parameters.json
+
+      - name: Run the compiled-template tests
+        run: uv run --frozen pytest tests/infra --compiled build/infra

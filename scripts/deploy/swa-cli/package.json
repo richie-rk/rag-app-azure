@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "description": "The pinned Static Web Apps CLI that scripts/deploy/deploy_web.py runs (83-infrastructure.md section 10.10).",
+  "dependencies": {
+    "@azure/static-web-apps-cli": "2.0.10"
+  },
+  "overrides": {
+    "adm-zip": "0.6.1",
+    "tmp": "0.2.7"
+  }
+}

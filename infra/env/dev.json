@@ -1,0 +1,131 @@
+{
+  "subscriptionId": "00000000-0000-0000-0000-000000000000",
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "location": "eastus2",
+  "staticWebAppLocation": "eastus2",
+  "network": {
+    "addressSpace": "10.61.0.0/22"
+  },
+  "webCustomDomains": [],
+  "web": {
+    "sku": "Free"
+  },
+  "api": {
+    "sku": "B1",
+    "minInstances": 1,
+    "maxInstances": 1,
+    "zoneRedundant": false
+  },
+  "ingestion": {
+    "sku": "EP1",
+    "alwaysReady": 1,
+    "maxBurst": 2
+  },
+  "sql": {
+    "sku": "GP_S_Gen5_2",
+    "minCapacity": 0.5,
+    "autoPauseDelayMinutes": 15,
+    "maxSizeGb": 32,
+    "zoneRedundant": false,
+    "backupRedundancy": "Local",
+    "pitrDays": 7
+  },
+  "cosmos": {
+    "serverless": true,
+    "backupTier": "Continuous7Days",
+    "maxThroughput": null
+  },
+  "conversationRetentionDays": 0,
+  "memoryRetentionDays": 0,
+  "cosmosGroupDataAccess": true,
+  "search": {
+    "sku": "basic",
+    "replicas": 1,
+    "partitions": 1
+  },
+  "openAi": {
+    "enabled": true,
+    "deployments": {
+      "chat": {
+        "name": "chat",
+        "model": "gpt-5.6-sol",
+        "version": "2026-07-09",
+        "type": "GlobalStandard",
+        "capacity": 30,
+        "versionUpgradeOption": "OnceCurrentVersionExpired",
+        "raiPolicyName": "docchat-text-guard",
+        "encoding": "o200k_base"
+      },
+      "chatSmall": {
+        "name": "chat-small",
+        "model": "gpt-5.6-terra",
+        "version": "2026-07-09",
+        "type": "GlobalStandard",
+        "capacity": 30,
+        "versionUpgradeOption": "OnceCurrentVersionExpired",
+        "raiPolicyName": "docchat-text-guard",
+        "encoding": "o200k_base"
+      },
+      "tableSummary": {
+        "name": "ingest-summary",
+        "model": "gpt-5.6-terra",
+        "version": "2026-07-09",
+        "type": "GlobalStandard",
+        "capacity": 30,
+        "versionUpgradeOption": "OnceCurrentVersionExpired",
+        "raiPolicyName": "docchat-table-summary-guard",
+        "encoding": "o200k_base"
+      }
+    },
+    "embeddingModels": [
+      {
+        "key": "te3-large-v1",
+        "model": "text-embedding-3-large",
+        "version": "1",
+        "queryType": "GlobalStandard",
+        "ingestionType": "GlobalStandard",
+        "queryCapacity": 30,
+        "ingestionCapacity": 60,
+        "defaultDimensions": 1024,
+        "allowedDimensions": [256, 1024, 3072],
+        "maxInputTokens": 8192,
+        "encoding": "cl100k_base"
+      }
+    ]
+  },
+  "modelStub": {
+    "enabled": false
+  },
+  "storage": {
+    "malwareScanning": false,
+    "malwareScanCapGbPerMonth": 1000
+  },
+  "keyVault": {
+    "purgeProtection": false,
+    "softDeleteDays": 7
+  },
+  "monitoring": {
+    "retentionDays": 30,
+    "dailyCapGb": 2
+  },
+  "telemetrySamplingRatio": 1.0,
+  "alerts": {
+    "enabled": true,
+    "ttftP95Ms": 20000,
+    "openAiFirstChunkP95Ms": 10000,
+    "openAiCallMeanMs": 8000
+  },
+  "budget": {
+    "enabled": true,
+    "amount": 650
+  },
+  "groups": {
+    "operators": "00000000-0000-0000-0000-000000000000",
+    "sqlAdmins": "00000000-0000-0000-0000-000000000000",
+    "users": "00000000-0000-0000-0000-000000000000",
+    "admins": "00000000-0000-0000-0000-000000000000",
+    "configOperators": "00000000-0000-0000-0000-000000000000",
+    "conversationReaders": "00000000-0000-0000-0000-000000000000",
+    "userDataOperators": "00000000-0000-0000-0000-000000000000"
+  }
+}

@@ -1,0 +1,228 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "9d0f1a52-4c1b-4d7e-9a3e-2f1b6c0d7e11",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureMetrics | where TimeGenerated {TimeRange} and ResourceId =~ \"{apiPlanId}\" and MetricName == \"CpuPercentage\" | summarize cpu = avg(Average) by bin(TimeGenerated, 1m)",
+        "size": 0,
+        "title": "API plan CPU",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "api-plan-cpu"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureMetrics | where TimeGenerated {TimeRange} and ResourceId =~ \"{autoscaleId}\" and MetricName in (\"ObservedCapacity\", \"ScaleActionsInitiated\") | summarize value = max(Maximum) by MetricName, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Autoscale capacity and actions",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "autoscale"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "union AppRequests, AppDependencies | where TimeGenerated {TimeRange} and AppRoleName in (\"docchat-api\", \"docchat-ingestion\") | summarize instances = dcount(AppRoleInstance) by AppRoleName, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Instances per role",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "instances-per-role"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.runtime.event_loop_lag\" | summarize maxLagMs = max(Max) by AppRoleName, AppRoleInstance, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "Event-loop lag per instance",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "event-loop-lag"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let r = AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name == \"POST /v1/chat/turns\" | project st = TimeGenerated, en = TimeGenerated + DurationMs * 1ms; union (r | project t = st, d = 1), (r | project t = en, d = -1) | order by t asc | extend concurrent = row_cumsum(d) | summarize peak = max(concurrent) by bin(t, 5m)",
+        "size": 0,
+        "title": "Peak concurrent chat streams",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "peak-chat-streams"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.sql.duration\" | summarize meanMs = sum(Sum) / sum(ItemCount), maxMs = max(Max), calls = sum(ItemCount) by operation = tostring(Properties[\"operation\"]), outcome = tostring(Properties[\"outcome\"]) | order by calls desc",
+        "size": 0,
+        "title": "SQL units of work",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "sql-units-of-work"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.sql.retries\", \"docchat.sql.failures\", \"docchat.sql.pool.in_use\", \"docchat.sql.idle_releases\") | summarize value = sum(Sum) by Name, AppRoleName, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "SQL retries, failures and pool",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "sql-retries-failures-pool"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.sql.pool.wait\" | summarize meanMs = sum(Sum) / sum(ItemCount), maxMs = max(Max) by AppRoleName, bin(TimeGenerated, 5m)",
+        "size": 0,
+        "title": "SQL pool wait",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "sql-pool-wait"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.conversations.request_charge\" | summarize meanRu = sum(Sum) / sum(ItemCount), maxRu = max(Max), n = sum(ItemCount) by operation = tostring(Properties[\"operation\"])",
+        "size": 0,
+        "title": "Cosmos DB request charge per operation",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "cosmos-request-charge"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ingestion.parse.peak_rss\" | summarize meanMb = sum(Sum) / sum(ItemCount), maxMb = max(Max) by command = tostring(Properties[\"parse_command\"])",
+        "size": 0,
+        "title": "Parse memory per command",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "parse-memory"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

@@ -1,0 +1,3 @@
+{"type":"meta","sessionId":"4f9bae5c-6d7e-4f80-8192-a3b4c5d6e7f8","turnId":"5aacbf6d-7e8f-4091-92a3-b4c5d6e7f809","sessionCreated":false,"replayed":false,"correlationId":"9f8e7d6c5b4a39281706f5e4d3c2b1a0"}
+{"type":"delta","text":"The answer started — "}
+{"type":"error","code":"model_unavailable","message":"The answer service isn't available right now. Try again in a minute.","retryable":true,"retryAfterSeconds":30,"correlationId":"9f8e7d6c5b4a39281706f5e4d3c2b1a0"}

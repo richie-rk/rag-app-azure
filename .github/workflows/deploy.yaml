@@ -1,0 +1,634 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "The environment to deploy"
+        type: choice
+        options: [dev, prod]
+        required: true
+      image_commit:
+        description: "The commit on main whose images to deploy (40 hexadecimal characters)"
+        type: string
+        required: true
+      rollback:
+        description: "Deploy an earlier release's images without provisioning"
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
+
+jobs:
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ github.sha }}
+      REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+    outputs:
+      commit: ${{ github.sha }}
+      built_at: ${{ steps.save.outputs.built_at }}
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      # One environment-free build serves every environment; deploy_web.py writes each one's
+      # config.json and staticwebapp.config.json at deploy time. check-dist.mjs, the build's last
+      # step, refuses a build holding either file.
+      - name: Build the web client
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Keep the web build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: web-dist
+          path: apps/web/dist/
+          retention-days: 90
+          if-no-files-found: error
+
+      # The deploy job runs the CLI from this archive with npx --no-install, so it installs nothing
+      # where an Azure token can be minted.
+      - name: Pack the pinned Static Web Apps CLI
+        run: |
+          npm ci --ignore-scripts --prefix scripts/deploy/swa-cli
+          mkdir -p build/swa-cli
+          tar -czf build/swa-cli/swa-cli.tgz -C scripts/deploy swa-cli
+
+      - name: Keep the Static Web Apps CLI archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: swa-cli
+          path: build/swa-cli/swa-cli.tgz
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      # This job holds no OIDC token and no Azure credential, so it doesn't know the registry; publish
+      # tags the images with the registry's login server, which leaves their image IDs unchanged.
+      - name: Build the images (T-453)
+        run: |
+          build() {
+            docker buildx build --platform linux/amd64 \
+              --file "$2" \
+              --build-arg "DOCCHAT_BUILD_COMMIT=${COMMIT}" \
+              --label "org.opencontainers.image.revision=${COMMIT}" \
+              --label "org.opencontainers.image.source=${REPOSITORY_URL}" \
+              --tag "docchat/$1:${COMMIT}" --load .
+          }
+          build api apps/api/Dockerfile
+          build ingestion apps/ingestion/Dockerfile
+          build model-stub tests/model-stub/Dockerfile
+
+      - name: Save the images
+        id: save
+        run: |
+          mkdir -p build/images
+          for image in api ingestion model-stub; do
+            docker save --output "build/images/${image}.tar" "docchat/${image}:${COMMIT}"
+          done
+          jq -n \
+            --arg api "$(docker image inspect --format '{{.Id}}' "docchat/api:${COMMIT}")" \
+            --arg ingestion "$(docker image inspect --format '{{.Id}}' "docchat/ingestion:${COMMIT}")" \
+            --arg stub "$(docker image inspect --format '{{.Id}}' "docchat/model-stub:${COMMIT}")" \
+            '{"api": $api, "ingestion": $ingestion, "model-stub": $stub}' > build/images/image-ids.json
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$GITHUB_OUTPUT"
+
+      # No image with a high or critical finding is pushed, so none can be deployed.
+      - name: Scan the images and write their SBOMs
+        run: |
+          mkdir -p build/audit build/sbom "$RUNNER_TEMP/trivy-cache"
+          trivy() {
+            docker run --rm \
+              --volume "$GITHUB_WORKSPACE:/work" --workdir /work \
+              --volume "$RUNNER_TEMP/trivy-cache:/cache" \
+              "$TRIVY_IMAGE" --cache-dir /cache "$@"
+          }
+          for image in api ingestion model-stub; do
+            trivy image --input "build/images/${image}.tar" --scanners vuln,secret --severity HIGH,CRITICAL \
+              --format json --exit-code 0 --output "build/audit/trivy-${image}.json"
+            trivy image --input "build/images/${image}.tar" --format cyclonedx --output "build/sbom/${image}.cdx.json"
+          done
+
+      - name: Gate the findings
+        run: uv run --frozen python scripts/ci/security_gate.py --job build
+
+      - name: Keep the SBOMs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: build/sbom/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Hand the images to publish
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: images-${{ github.sha }}
+          path: build/images/
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    environment: dev
+    concurrency:
+      group: docchat-registry
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+      attestations: write
+    env:
+      COMMIT: ${{ needs.build.outputs.commit }}
+      BUILT_AT: ${{ needs.build.outputs.built_at }}
+    outputs:
+      api_image: ${{ steps.push.outputs.api_image }}
+      ingestion_image: ${{ steps.push.outputs.ingestion_image }}
+    steps:
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Download the built images
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: images-${{ needs.build.outputs.commit }}
+          path: build/images
+
+      # Only the bytes the build job scanned may be pushed.
+      - name: Load the images and compare their IDs
+        run: |
+          fail() {
+            line="$(jq -cn --arg code "$1" --arg message "$2" --arg detail "$3" '{code: $code, message: $message, detail: $detail}')"
+            echo "$line" >&2
+            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          }
+          for image in api ingestion model-stub; do
+            docker load --input "build/images/${image}.tar"
+            expected="$(jq -r --arg image "$image" '.[$image]' build/images/image-ids.json)"
+            actual="$(docker image inspect --format '{{.Id}}' "docchat/${image}:${COMMIT}")"
+            if [ "$actual" != "$expected" ]; then
+              fail image_id_mismatch "A loaded image isn't the one the build job scanned; nothing was pushed." "docchat/${image}"
+            fi
+          done
+
+      - name: Sign in to Azure as the dev deploy identity
+        id: login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Find the shared registry
+        id: registry
+        run: |
+          name="$(az acr list --resource-group rg-docchat-shared --query '[0].name' -o tsv)"
+          test -n "$name"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "login_server=$(az acr show --name "$name" --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the registry runner rule
+        id: open
+        run: uv run --frozen python scripts/deploy/firewall.py open --target registry --env dev
+
+      - name: Sign in to the registry
+        env:
+          REGISTRY_NAME: ${{ steps.registry.outputs.name }}
+        run: az acr login --name "$REGISTRY_NAME"
+
+      - name: Push the images
+        id: push
+        env:
+          LOGIN_SERVER: ${{ steps.registry.outputs.login_server }}
+        run: |
+          push() {
+            target="${LOGIN_SERVER}/docchat/$1:${COMMIT}"
+            docker tag "docchat/$1:${COMMIT}" "$target"
+            docker push "$target"
+            reference="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$target" | grep "^${LOGIN_SERVER}/docchat/$1@sha256:")"
+            echo "$2_image=${reference}" >> "$GITHUB_OUTPUT"
+            echo "$2_digest=${reference##*@}" >> "$GITHUB_OUTPUT"
+          }
+          push api api
+          push ingestion ingestion
+          push model-stub model_stub
+
+      - name: Attest the API image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.registry.outputs.login_server }}/docchat/api
+          subject-digest: ${{ steps.push.outputs.api_digest }}
+          push-to-registry: false
+
+      - name: Attest the ingestion image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.registry.outputs.login_server }}/docchat/ingestion
+          subject-digest: ${{ steps.push.outputs.ingestion_digest }}
+          push-to-registry: false
+
+      - name: Attest the model-stub image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ steps.registry.outputs.login_server }}/docchat/model-stub
+          subject-digest: ${{ steps.push.outputs.model_stub_digest }}
+          push-to-registry: false
+
+      # Only deploy.yaml running on main for this commit produces a matching attestation, so a tag
+      # that anyone holding AcrPush re-points can't reach a deploy.
+      - name: Verify the attestations (T-453)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_IMAGE: ${{ steps.push.outputs.api_image }}
+          INGESTION_IMAGE: ${{ steps.push.outputs.ingestion_image }}
+          MODEL_STUB_IMAGE: ${{ steps.push.outputs.model_stub_image }}
+        run: |
+          fail() {
+            line="$(jq -cn --arg code "$1" --arg message "$2" --arg detail "$3" '{code: $code, message: $message, detail: $detail}')"
+            echo "$line" >&2
+            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          }
+          for reference in "$API_IMAGE" "$INGESTION_IMAGE" "$MODEL_STUB_IMAGE"; do
+            if ! gh attestation verify "oci://${reference}" --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/deploy.yaml" \
+                --source-ref refs/heads/main --source-digest "$COMMIT"; then
+              fail image_attestation_invalid \
+                "An image digest has no valid build attestation from the deploy workflow on main for its commit; nothing was deployed." \
+                "$reference"
+            fi
+          done
+
+      - name: Close the registry runner rule
+        if: ${{ always() && steps.open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target registry --env dev
+
+      - name: Write the release manifest
+        env:
+          API_IMAGE: ${{ steps.push.outputs.api_image }}
+          INGESTION_IMAGE: ${{ steps.push.outputs.ingestion_image }}
+          MODEL_STUB_IMAGE: ${{ steps.push.outputs.model_stub_image }}
+        run: |
+          mkdir -p build/release
+          jq -n --arg commit "$COMMIT" --arg api "$API_IMAGE" --arg ingestion "$INGESTION_IMAGE" --arg stub "$MODEL_STUB_IMAGE" --arg built "$BUILT_AT" \
+            '{commit: $commit, apiImage: $api, ingestionImage: $ingestion, modelStubImage: $stub, builtAt: $built}' > build/release/release-manifest.json
+
+      - name: Keep the release manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release-manifest
+          path: build/release/release-manifest.json
+          retention-days: 90
+          if-no-files-found: error
+
+  resolve:
+    if: github.event_name == 'workflow_dispatch'
+    environment: dev
+    concurrency:
+      group: docchat-registry
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    env:
+      COMMIT: ${{ inputs.image_commit }}
+    outputs:
+      api_image: ${{ steps.lookup.outputs.api_image }}
+      ingestion_image: ${{ steps.lookup.outputs.ingestion_image }}
+    steps:
+      - name: Check the image commit
+        run: |
+          if ! printf '%s' "$COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::image_commit must be 40 lower-case hexadecimal characters"; exit 1
+          fi
+
+      - name: Check out the history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check the commit is on main
+        run: |
+          fail() {
+            line="$(jq -cn --arg code "$1" --arg message "$2" --arg detail "$3" '{code: $code, message: $message, detail: $detail}')"
+            echo "$line" >&2
+            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          }
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            fail commit_not_on_main "The commit isn't on main, or one of its images isn't in the registry." "$COMMIT"
+          fi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the dev deploy identity
+        id: login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Find the shared registry
+        id: registry
+        run: |
+          name="$(az acr list --resource-group rg-docchat-shared --query '[0].name' -o tsv)"
+          test -n "$name"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "login_server=$(az acr show --name "$name" --query loginServer -o tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the registry runner rule
+        id: open
+        run: uv run --frozen python scripts/deploy/firewall.py open --target registry --env dev
+
+      - name: Sign in to the registry
+        env:
+          REGISTRY_NAME: ${{ steps.registry.outputs.name }}
+        run: az acr login --name "$REGISTRY_NAME"
+
+      - name: Look up the images by commit tag
+        id: lookup
+        env:
+          REGISTRY_NAME: ${{ steps.registry.outputs.name }}
+          LOGIN_SERVER: ${{ steps.registry.outputs.login_server }}
+        run: |
+          fail() {
+            line="$(jq -cn --arg code "$1" --arg message "$2" --arg detail "$3" '{code: $code, message: $message, detail: $detail}')"
+            echo "$line" >&2
+            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          }
+          lookup() {
+            if ! digest="$(az acr manifest show-metadata --registry "$REGISTRY_NAME" --name "docchat/$1:${COMMIT}" --query digest -o tsv)" \
+                || [ -z "$digest" ]; then
+              fail image_tag_missing "The commit isn't on main, or one of its images isn't in the registry." "docchat/$1:${COMMIT}"
+            fi
+            echo "$2_image=${LOGIN_SERVER}/docchat/$1@${digest}" >> "$GITHUB_OUTPUT"
+          }
+          lookup api api
+          lookup ingestion ingestion
+          lookup model-stub model_stub
+          created="$(az acr manifest show-metadata --registry "$REGISTRY_NAME" --name "docchat/ingestion:${COMMIT}" --query createdTime -o tsv)"
+          echo "built_at=$(date -u -d "$created" +%Y-%m-%dT%H:%M:%S.%3NZ)" >> "$GITHUB_OUTPUT"
+
+      # Before any environment deploys a dispatched release, every digest's attestation must come
+      # from deploy.yaml on main for that commit; a re-pointed tag stops here (runbook R31).
+      - name: Verify the attestations (T-454)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_IMAGE: ${{ steps.lookup.outputs.api_image }}
+          INGESTION_IMAGE: ${{ steps.lookup.outputs.ingestion_image }}
+          MODEL_STUB_IMAGE: ${{ steps.lookup.outputs.model_stub_image }}
+        run: |
+          fail() {
+            line="$(jq -cn --arg code "$1" --arg message "$2" --arg detail "$3" '{code: $code, message: $message, detail: $detail}')"
+            echo "$line" >&2
+            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          }
+          for reference in "$API_IMAGE" "$INGESTION_IMAGE" "$MODEL_STUB_IMAGE"; do
+            if ! gh attestation verify "oci://${reference}" --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/deploy.yaml" \
+                --source-ref refs/heads/main --source-digest "$COMMIT"; then
+              fail image_attestation_invalid \
+                "An image digest has no valid build attestation from the deploy workflow on main for its commit; nothing was deployed." \
+                "$reference"
+            fi
+          done
+
+      - name: Close the registry runner rule
+        if: ${{ always() && steps.open.outcome != 'skipped' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target registry --env dev
+
+      - name: Write the release manifest
+        env:
+          API_IMAGE: ${{ steps.lookup.outputs.api_image }}
+          INGESTION_IMAGE: ${{ steps.lookup.outputs.ingestion_image }}
+          MODEL_STUB_IMAGE: ${{ steps.lookup.outputs.model_stub_image }}
+          BUILT_AT: ${{ steps.lookup.outputs.built_at }}
+        run: |
+          mkdir -p build/release
+          jq -n --arg commit "$COMMIT" --arg api "$API_IMAGE" --arg ingestion "$INGESTION_IMAGE" --arg stub "$MODEL_STUB_IMAGE" --arg built "$BUILT_AT" \
+            '{commit: $commit, apiImage: $api, ingestionImage: $ingestion, modelStubImage: $stub, builtAt: $built}' > build/release/release-manifest.json
+
+      - name: Keep the release manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release-manifest
+          path: build/release/release-manifest.json
+          retention-days: 90
+          if-no-files-found: error
+
+  # A dispatch deploys an earlier release, so its web client is built again at that commit; the
+  # job holds no credentials, because npm ci runs here.
+  resolve-web:
+    if: github.event_name == 'workflow_dispatch'
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the image commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.image_commit }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Build the web client
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Keep the web build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: web-dist
+          path: apps/web/dist/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Pack the pinned Static Web Apps CLI
+        run: |
+          npm ci --ignore-scripts --prefix scripts/deploy/swa-cli
+          mkdir -p build/swa-cli
+          tar -czf build/swa-cli/swa-cli.tgz -C scripts/deploy swa-cli
+
+      - name: Keep the Static Web Apps CLI archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: swa-cli
+          path: build/swa-cli/swa-cli.tgz
+          retention-days: 90
+          if-no-files-found: error
+
+  deploy-dev:
+    needs: [publish, resolve, resolve-web]
+    if: ${{ !cancelled() && !failure() && (github.event_name == 'push' || inputs.environment == 'dev') }}
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    uses: ./.github/workflows/deploy-environment.yaml
+    with:
+      environment: dev
+      api_image: ${{ needs.publish.outputs.api_image || needs.resolve.outputs.api_image }}
+      ingestion_image: ${{ needs.publish.outputs.ingestion_image || needs.resolve.outputs.ingestion_image }}
+      # build (push) or resolve-web (dispatch) of this run uploaded web-dist and swa-cli.
+      web_artifact_run_id: ${{ github.run_id }}
+      mode: ${{ inputs.rollback && 'images-only' || 'full' }}
+      rollback: ${{ inputs.rollback == true }}
+
+  test-dev:
+    needs: deploy-dev
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deployed-tests.yaml
+    with:
+      environment: dev
+      suite: ${{ github.event_name == 'push' && 'smoke' || 'full' }}
+
+  # The prod reviewers (team docchat-release-approvers) approve the called job's environment, and no
+  # administrator can bypass them (83-infrastructure.md section 10.4). On a push it follows a passed
+  # test-dev; a dispatch to prod deploys the resolved release directly.
+  deploy-prod:
+    needs: [publish, resolve, resolve-web, test-dev]
+    if: ${{ !cancelled() && !failure() && (github.event_name == 'push' || inputs.environment == 'prod') }}
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    uses: ./.github/workflows/deploy-environment.yaml
+    with:
+      environment: prod
+      api_image: ${{ needs.publish.outputs.api_image || needs.resolve.outputs.api_image }}
+      ingestion_image: ${{ needs.publish.outputs.ingestion_image || needs.resolve.outputs.ingestion_image }}
+      web_artifact_run_id: ${{ github.run_id }}
+      mode: ${{ inputs.rollback && 'images-only' || 'full' }}
+      rollback: ${{ inputs.rollback == true }}
+
+  # prod has no test client, so only the anonymous checks run, in jobs that hold no OIDC token. A
+  # run whose release-ordering check found a newer release in prod deployed nothing and publishes
+  # no endpoints, so it neither tests nor tags.
+  test-prod:
+    needs: deploy-prod
+    if: needs.deploy-prod.outputs.api_base_url != ''
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deployed-tests.yaml
+    with:
+      environment: prod
+      suite: prod_smoke
+      api_base_url: ${{ needs.deploy-prod.outputs.api_base_url }}
+      web_base_url: ${{ needs.deploy-prod.outputs.web_base_url }}
+      web_client_id: ${{ needs.deploy-prod.outputs.web_client_id }}
+      api_scope: ${{ needs.deploy-prod.outputs.api_scope }}
+
+  # The annotated deploy-prod-<yyyymmdd-hhmm> tag on the deployed commit, written through the REST
+  # API so the job holds no repository credentials; rollbacks (R02) and the nightly re-scan read it.
+  tag-prod:
+    needs: [deploy-prod, test-prod]
+    if: needs.deploy-prod.outputs.api_base_url != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      DEPLOYED_COMMIT: ${{ inputs.image_commit || github.sha }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tag the deployed commit
+        run: |
+          if ! printf '%s' "$DEPLOYED_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::the deployed commit isn't 40 hexadecimal characters"; exit 1
+          fi
+          tag="deploy-prod-$(date -u +%Y%m%d-%H%M)"
+          object="$(gh api "repos/{owner}/{repo}/git/tags" \
+            -f tag="$tag" \
+            -f message="prod deploy of ${DEPLOYED_COMMIT} by run ${GITHUB_RUN_ID}" \
+            -f object="$DEPLOYED_COMMIT" \
+            -f type=commit \
+            --jq .sha)"
+          gh api "repos/{owner}/{repo}/git/refs" -f ref="refs/tags/${tag}" -f sha="$object" > /dev/null
+          echo "Tagged ${DEPLOYED_COMMIT} as ${tag}" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,209 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "9d0f1a52-4c1b-4d7e-9a3e-2f1b6c0d7e11",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "3c6e2b8a-0f5d-4a61-8f2e-7b9c1d4e5a22",
+            "version": "KqlParameterItem/1.0",
+            "name": "BudgetId",
+            "type": 1,
+            "isHiddenWhenLocked": true,
+            "value": "{budgetId}"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "budget-parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "{\"version\":\"ARMEndpoint/1.0\",\"data\":null,\"headers\":[],\"method\":\"GET\",\"path\":\"{budgetId}\",\"urlParams\":[{\"key\":\"api-version\",\"value\":\"2026-06-01\"}],\"batchDisabled\":false,\"transformers\":[{\"type\":\"jsonpath\",\"settings\":{\"columns\":[{\"path\":\"$.properties.amount\",\"columnid\":\"amount\"},{\"path\":\"$.properties.currentSpend.amount\",\"columnid\":\"currentSpend\"},{\"path\":\"$.properties.currentSpend.unit\",\"columnid\":\"unit\"},{\"path\":\"$.properties.forecastSpend.amount\",\"columnid\":\"forecastSpend\"}]}}]}",
+        "size": 4,
+        "title": "Budget status (notifications at 50%, 80% and 100% of the amount)",
+        "queryType": 12,
+        "visualization": "table"
+      },
+      "conditionalVisibility": {
+        "parameterName": "BudgetId",
+        "comparison": "isNotEqualTo",
+        "value": ""
+      },
+      "name": "budget-status"
+    },
+    {
+      "type": 1,
+      "content": {
+        "json": "No budget in this environment"
+      },
+      "conditionalVisibility": {
+        "parameterName": "BudgetId",
+        "comparison": "isEqualTo",
+        "value": ""
+      },
+      "name": "no-budget"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.openai.estimated_cost\" | summarize cost = sum(Sum) / 1e6 by deployment = tostring(Properties[\"deployment\"]), bin(TimeGenerated, 1d)",
+        "size": 0,
+        "title": "Estimated model cost per day by deployment",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "estimated-model-cost"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.openai.tokens\", \"docchat.ingestion.tokens\") | summarize tokens = sum(Sum) by deployment = tostring(Properties[\"deployment\"]), bin(TimeGenerated, 1d)",
+        "size": 0,
+        "title": "Tokens per day by deployment, chat path and ingestion",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "tokens-per-day"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ingestion.docintel.pages\" | summarize pages = sum(Sum) by bin(TimeGenerated, 1d)",
+        "size": 0,
+        "title": "Document Intelligence pages per day",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "docintel-pages"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.pricing.rate_missing\" | summarize calls = sum(Sum) by model = tostring(Properties[\"model\"])",
+        "size": 0,
+        "title": "Models without a price",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "models-without-price"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.chat.prompt.tokens\" | summarize meanTokens = sum(Sum) / sum(ItemCount), maxTokens = max(Max)",
+        "size": 0,
+        "title": "Prompt tokens per turn",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "tiles"
+      },
+      "name": "prompt-tokens-per-turn"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Usage | where TimeGenerated {TimeRange} and IsBillable == true | summarize gb = sum(Quantity) / 1000.0 by DataType, bin(TimeGenerated, 1d)",
+        "size": 0,
+        "title": "Workspace ingestion per day by table (GB)",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "workspace-ingestion"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

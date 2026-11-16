@@ -1,0 +1,21 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "path": "/documentintelligence/documentModels/prebuilt-layout:analyze"
+    },
+    "response": {
+      "status": 400,
+      "json": {
+        "error": {
+          "code": "InvalidRequest",
+          "message": "Invalid request.",
+          "innererror": {
+            "code": "PasswordProtectedDocument",
+            "message": "The document is protected by a password."
+          }
+        }
+      }
+    }
+  }
+]

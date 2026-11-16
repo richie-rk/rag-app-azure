@@ -1,0 +1,8 @@
+# Waivers for scanner findings below high severity only (82-security.md section 13, ADR 0136).
+# Each entry: id, scanner (pip-audit | npm-audit | zizmor | deptry), scope (package or path glob),
+# reason (at least 20 characters), ticket (URL), added, expires (at most added + 90 days) and
+# approved_by (a handle listed in approvers.yaml). High and critical findings, and every Trivy
+# and gitleaks finding, can't be waived; the named exceptions at high severity, Trivy's DS002 on
+# the ingestion image (ADR 0153) and an image's OS-package vulnerabilities without a fix
+# (ADR 0154), are exceptions.yaml's, never entries here.
+waivers: []

@@ -1,0 +1,552 @@
+name: deployed-tests
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "The environment to test: dev, prod, or load from load-test.yaml (suite smoke)"
+        type: string
+        required: true
+      suite:
+        description: "smoke, full, infra, scan_prepare or scan (dev); prod_smoke (prod)"
+        type: string
+        required: true
+      stage_acceptance:
+        description: "Run the stage-acceptance tests; only with suite full or infra"
+        type: boolean
+        default: false
+      # prod has no test client and no job here signs in to it, so its public values come from
+      # deploy.yaml's deploy-prod job, or from an operator's azd env get-values -e prod.
+      api_base_url:
+        description: "prod only: API_BASE_URL"
+        type: string
+        default: ""
+      web_base_url:
+        description: "prod only: WEB_BASE_URL"
+        type: string
+        default: ""
+      web_client_id:
+        description: "prod only: WEB_CLIENT_ID"
+        type: string
+        default: ""
+      api_scope:
+        description: "prod only: API_SCOPE"
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "The environment to test"
+        type: choice
+        options: [dev, prod]
+        required: true
+      suite:
+        description: "The suite to run"
+        type: choice
+        options: [smoke, full, infra, scan_prepare, scan, prod_smoke]
+        required: true
+      stage_acceptance:
+        description: "Run the stage-acceptance tests; only with suite full or infra"
+        type: boolean
+        default: false
+      api_base_url:
+        description: "prod only: API_BASE_URL (azd env get-values -e prod)"
+        type: string
+        default: ""
+      web_base_url:
+        description: "prod only: WEB_BASE_URL"
+        type: string
+        default: ""
+      web_client_id:
+        description: "prod only: WEB_CLIENT_ID"
+        type: string
+        default: ""
+      api_scope:
+        description: "prod only: API_SCOPE"
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  # dev reads its outputs as the dev deploy identity; load as id-docchat-citest in load-tests on
+  # the test runner, which reads no secret and opens no rule here (84-testing.md section 6.3) and
+  # ends, like every load-tests job, with the always-run vault close (T-456); prod's public values
+  # arrive as inputs, so prod has no endpoints job.
+  endpoints:
+    if: inputs.environment != 'prod'
+    environment: ${{ inputs.environment == 'load' && 'load-tests' || 'dev' }}
+    runs-on: ${{ inputs.environment == 'load' && (vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04') || 'ubuntu-24.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      api_base_url: ${{ steps.values.outputs.api_base_url }}
+      web_base_url: ${{ steps.values.outputs.web_base_url }}
+      web_client_id: ${{ steps.values.outputs.web_client_id }}
+      test_client_id: ${{ steps.values.outputs.test_client_id }}
+      api_client_id: ${{ steps.values.outputs.api_client_id }}
+      api_scope: ${{ steps.values.outputs.api_scope }}
+      ingestion_app_name: ${{ steps.values.outputs.ingestion_app_name }}
+      workspace_id: ${{ steps.values.outputs.workspace_id }}
+    steps:
+      # A combination the suites don't support fails here, before any sign-in.
+      - name: Check the inputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          SUITE: ${{ inputs.suite }}
+          STAGE_ACCEPTANCE: ${{ inputs.stage_acceptance }}
+        run: |
+          case "$ENVIRONMENT" in
+            dev) ;;
+            load)
+              if [ "$SUITE" != "smoke" ]; then
+                echo "::error::load runs the smoke suite only"; exit 1
+              fi
+              ;;
+            *) echo "::error::unknown environment ${ENVIRONMENT}"; exit 1 ;;
+          esac
+          case "$SUITE" in
+            smoke|full|infra|scan_prepare|scan) ;;
+            prod_smoke) echo "::error::prod_smoke runs only in prod"; exit 1 ;;
+            *) echo "::error::unknown suite ${SUITE}"; exit 1 ;;
+          esac
+          if [ "$STAGE_ACCEPTANCE" = "true" ] && [ "$SUITE" != "full" ] && [ "$SUITE" != "infra" ]; then
+            echo "::error::stage_acceptance needs environment dev and suite full or infra"; exit 1
+          fi
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # For the vault close of load's run.
+      - name: Set up uv
+        if: inputs.environment == 'load'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Sign in to Azure as the environment's reading identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ inputs.environment == 'load' && vars.DOCCHAT_CI_TEST_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      - name: Read the deployment outputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          AZURE_CLIENT_ID: ${{ inputs.environment == 'load' && vars.DOCCHAT_CI_TEST_CLIENT_ID || vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: |
+          azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new "$ENVIRONMENT" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP "rg-docchat-${ENVIRONMENT}"
+          azd env refresh -e "$ENVIRONMENT" --no-prompt
+
+      - name: Publish the endpoints
+        id: values
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          azd env get-values -e "$ENVIRONMENT" --output json > "$RUNNER_TEMP/values.json"
+          value() { jq -r --arg key "$1" '.[$key] // ""' "$RUNNER_TEMP/values.json"; }
+          {
+            echo "api_base_url=$(value API_BASE_URL)"
+            echo "web_base_url=$(value WEB_BASE_URL)"
+            echo "web_client_id=$(value WEB_CLIENT_ID)"
+            echo "test_client_id=$(value TEST_CLIENT_ID)"
+            echo "api_client_id=$(value API_CLIENT_ID)"
+            echo "api_scope=$(value API_SCOPE)"
+            echo "ingestion_app_name=$(value DOCCHAT_INGESTION_APP_NAME)"
+            echo "workspace_id=$(value DOCCHAT_LOG_ANALYTICS_WORKSPACE_ID)"
+          } >> "$GITHUB_OUTPUT"
+
+      # This job opens no rule, so the close finds no window of its own and changes nothing.
+      - name: Remove the test vault's runner rule
+        if: ${{ always() && inputs.environment == 'load' && vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env load
+
+  pytest:
+    needs: endpoints
+    if: contains(fromJSON('["smoke", "full", "scan_prepare", "scan"]'), inputs.suite)
+    environment: ${{ inputs.environment == 'load' && 'load-tests' || 'dev-tests' }}
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    # scan polls for up to 245 minutes while Defender scans its uploads.
+    timeout-minutes: ${{ inputs.suite == 'full' && 90 || inputs.suite == 'scan' && 300 || 30 }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_ENV_NAME: ${{ inputs.environment }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_TEST_NOROLE_SKIP_REASON: ${{ vars.DOCCHAT_TEST_NOROLE_SKIP_REASON }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      API_BASE_URL: ${{ needs.endpoints.outputs.api_base_url }}
+      WEB_BASE_URL: ${{ needs.endpoints.outputs.web_base_url }}
+      WEB_CLIENT_ID: ${{ needs.endpoints.outputs.web_client_id }}
+      TEST_CLIENT_ID: ${{ needs.endpoints.outputs.test_client_id }}
+      API_CLIENT_ID: ${{ needs.endpoints.outputs.api_client_id }}
+      API_SCOPE: ${{ needs.endpoints.outputs.api_scope }}
+      DOCCHAT_INGESTION_APP_NAME: ${{ needs.endpoints.outputs.ingestion_app_name }}
+      DOCCHAT_LOG_ANALYTICS_WORKSPACE_ID: ${{ needs.endpoints.outputs.workspace_id }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the CI test identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # The session fixture's token step opens and closes the test vault's read window itself.
+      - name: Run the deployed suite
+        env:
+          SUITE: ${{ inputs.suite }}
+          STAGE_ACCEPTANCE: ${{ inputs.stage_acceptance }}
+        run: |
+          set -- tests/deployed --deployed -m "${SUITE} and not resume"
+          if [ "$STAGE_ACCEPTANCE" = "true" ]; then
+            set -- "$@" --stage-acceptance
+          fi
+          uv run --frozen pytest "$@"
+
+      # Removes the rule when the test process was killed before its own close.
+      - name: Remove the test vault's runner rule
+        if: ${{ always() && vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env "$ENVIRONMENT"
+
+  # The crash-resume test T-587 (84-testing.md section 6.7) is two jobs: the uploads need test
+  # tokens, which only id-docchat-citest's jobs hold, and the restart needs the dev deploy identity.
+  resume-start:
+    needs: endpoints
+    if: inputs.suite == 'full' && inputs.environment == 'dev'
+    environment: dev-tests
+    runs-on: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING == 'true' && fromJSON('{"group":"docchat-ci-private"}') || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      run_ids: ${{ steps.report.outputs.run_ids }}
+      large_item_id: ${{ steps.report.outputs.large_item_id }}
+    env:
+      AZURE_ENV_NAME: ${{ inputs.environment }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      DOCCHAT_CI_TEST_CLIENT_ID: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+      DOCCHAT_TEST_VAULT_URI: ${{ vars.DOCCHAT_TEST_VAULT_URI }}
+      DOCCHAT_TEST_USER_DOMAIN: ${{ vars.DOCCHAT_TEST_USER_DOMAIN }}
+      DOCCHAT_TEST_NOROLE_SKIP_REASON: ${{ vars.DOCCHAT_TEST_NOROLE_SKIP_REASON }}
+      DOCCHAT_CI_PRIVATE_NETWORKING: ${{ vars.DOCCHAT_CI_PRIVATE_NETWORKING }}
+      API_BASE_URL: ${{ needs.endpoints.outputs.api_base_url }}
+      WEB_BASE_URL: ${{ needs.endpoints.outputs.web_base_url }}
+      WEB_CLIENT_ID: ${{ needs.endpoints.outputs.web_client_id }}
+      TEST_CLIENT_ID: ${{ needs.endpoints.outputs.test_client_id }}
+      API_CLIENT_ID: ${{ needs.endpoints.outputs.api_client_id }}
+      API_SCOPE: ${{ needs.endpoints.outputs.api_scope }}
+      DOCCHAT_INGESTION_APP_NAME: ${{ needs.endpoints.outputs.ingestion_app_name }}
+      DOCCHAT_LOG_ANALYTICS_WORKSPACE_ID: ${{ needs.endpoints.outputs.workspace_id }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the CI test identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.DOCCHAT_CI_TEST_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # Uploads the large PDF and the four fixture documents and waits until the large item reaches
+      # embed; the session fixture's token step opens and closes the test vault's read window itself.
+      - name: Start the runs the restart interrupts
+        run: uv run --frozen pytest tests/deployed/test_ingestion_resume.py --deployed -m resume
+
+      - name: Publish the run IDs
+        id: report
+        run: |
+          echo "run_ids=$(jq -r '.runIds | join(",")' reports/resume.json)" >> "$GITHUB_OUTPUT"
+          echo "large_item_id=$(jq -r '.largeItemId' reports/resume.json)" >> "$GITHUB_OUTPUT"
+
+      # Removes the rule when the test process was killed before its own close.
+      - name: Remove the test vault's runner rule
+        if: ${{ always() && vars.DOCCHAT_CI_PRIVATE_NETWORKING != 'true' }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: uv run --frozen python scripts/deploy/firewall.py close --target vault --env "$ENVIRONMENT"
+
+  resume-restart:
+    needs: [endpoints, resume-start]
+    if: inputs.suite == 'full' && inputs.environment == 'dev'
+    environment: dev
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Sign in to Azure as the dev deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # restarted_at is the time the restart command returned; resume_check compares every
+      # activity span of the two runs with it.
+      - name: Restart the ingestion app
+        id: restart
+        env:
+          INGESTION_APP_NAME: ${{ needs.endpoints.outputs.ingestion_app_name }}
+        run: |
+          az functionapp restart --name "$INGESTION_APP_NAME" --resource-group rg-docchat-dev
+          echo "restarted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Check that the runs resumed without repeating finished work
+        env:
+          WORKSPACE_ID: ${{ needs.endpoints.outputs.workspace_id }}
+          RUN_IDS: ${{ needs.resume-start.outputs.run_ids }}
+          RESTARTED_AT: ${{ steps.restart.outputs.restarted_at }}
+        run: >-
+          uv run --frozen python -m docchat_testing.resume_check
+          --workspace-id "$WORKSPACE_ID" --run-ids "$RUN_IDS" --restarted-at "$RESTARTED_AT"
+
+  infra-checks:
+    needs: endpoints
+    if: inputs.suite == 'infra'
+    environment: dev
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # The suite opens and closes the dev SQL runner rule, which this group serialises with the dev deploy.
+    concurrency:
+      group: docchat-env-dev
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Set up azd
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553  # v2.4.0
+        with:
+          version: "1.35.1"
+
+      - name: Sign in to Azure as the dev deploy identity
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Turn off dynamic extension installs
+        run: az config set extension.use_dynamic_install=no
+
+      # The suite and firewall.py read the environment's resource names from .azure/dev/.env.
+      - name: Load the dev environment's values
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: |
+          azd auth login --client-id "$AZURE_CLIENT_ID" --federated-credential-provider github --tenant-id "$AZURE_TENANT_ID"
+          azd env new dev --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
+          azd env set AZURE_RESOURCE_GROUP rg-docchat-dev
+          azd env refresh -e dev --no-prompt
+
+      # A rule a crashed runner left behind is removed before the suite adds its own.
+      - name: Sweep stale SQL runner rules
+        run: uv run --frozen python scripts/deploy/firewall.py sweep --target sql --env dev
+
+      - name: Run the deployed infrastructure suite
+        env:
+          STAGE_ACCEPTANCE: ${{ inputs.stage_acceptance }}
+        run: |
+          set -- tests/deployed --deployed -m infra
+          if [ "$STAGE_ACCEPTANCE" = "true" ]; then
+            set -- "$@" --stage-acceptance
+          fi
+          uv run --frozen pytest "$@"
+
+  # prod's anonymous checks (T-588): no GitHub environment, no OIDC token and no sign-in, because
+  # prod has no test client. It runs for every prod call, so a prod call with another suite fails
+  # in its first step, before anything else runs.
+  prod-smoke:
+    if: inputs.environment == 'prod'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      AZURE_ENV_NAME: prod
+      API_BASE_URL: ${{ inputs.api_base_url }}
+      WEB_BASE_URL: ${{ inputs.web_base_url }}
+      WEB_CLIENT_ID: ${{ inputs.web_client_id }}
+      API_SCOPE: ${{ inputs.api_scope }}
+    steps:
+      - name: Check the inputs
+        env:
+          SUITE: ${{ inputs.suite }}
+          STAGE_ACCEPTANCE: ${{ inputs.stage_acceptance }}
+        run: |
+          if [ "$SUITE" != "prod_smoke" ]; then
+            echo "::error::prod runs only the prod_smoke suite"; exit 1
+          fi
+          if [ "$STAGE_ACCEPTANCE" = "true" ]; then
+            echo "::error::stage_acceptance needs environment dev and suite full or infra"; exit 1
+          fi
+          for url in "$API_BASE_URL" "$WEB_BASE_URL"; do
+            if ! printf '%s' "$url" | grep -Eq '^https://[A-Za-z0-9.-]+$'; then
+              echo "::error::api_base_url and web_base_url must be https origins"; exit 1
+            fi
+          done
+          if [ -z "$WEB_CLIENT_ID" ] || [ -z "$API_SCOPE" ]; then
+            echo "::error::web_client_id and api_scope are required in prod"; exit 1
+          fi
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Install the workspace from the lockfile
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Run the prod smoke suite
+        run: uv run --frozen pytest tests/deployed --deployed -m prod_smoke
+
+  # The deployed web smoke specs (T-348) run unauthenticated against the site with the environment's
+  # public values: after a dev smoke run, and in prod once prod-smoke has checked the inputs. npm ci
+  # runs here, so the job holds no id-token and signs in nowhere.
+  web-deployed:
+    needs: [endpoints, prod-smoke]
+    if: >-
+      ${{ !cancelled() && (
+      (inputs.environment == 'dev' && inputs.suite == 'smoke' && needs.endpoints.result == 'success')
+      || (inputs.environment == 'prod' && inputs.suite == 'prod_smoke' && needs.prod-smoke.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      WEB_BASE_URL: ${{ inputs.environment == 'prod' && inputs.web_base_url || needs.endpoints.outputs.web_base_url }}
+      API_BASE_URL: ${{ inputs.environment == 'prod' && inputs.api_base_url || needs.endpoints.outputs.api_base_url }}
+      WEB_CLIENT_ID: ${{ inputs.environment == 'prod' && inputs.web_client_id || needs.endpoints.outputs.web_client_id }}
+      API_SCOPE: ${{ inputs.environment == 'prod' && inputs.api_scope || needs.endpoints.outputs.api_scope }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+    defaults:
+      run:
+        working-directory: tests/e2e
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Install the browser-test package from its lockfile
+        run: npm ci
+
+      - name: Install Playwright's Chromium
+        run: npx --no-install playwright install --with-deps chromium
+
+      - name: Run the deployed web smoke specs (T-348)
+        run: npx --no-install playwright test specs/web-deployed/ --project chromium
+
+      - name: Keep the traces of failed specs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: web-deployed-results
+          path: tests/e2e/test-results/
+          if-no-files-found: ignore

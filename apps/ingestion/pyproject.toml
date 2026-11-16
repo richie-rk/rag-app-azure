@@ -1,0 +1,33 @@
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "docchat-ingestion"
+version = "0.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "docchat-core",
+  "azure-functions>=2.3.0,<3",
+  "azure-functions-durable>=1.7.0,<2",
+  "azure-functions-runtime>=1.2.1,<2",
+  "azure-core>=1.41.0,<2",
+  "azure-search-documents>=12.0.0,<13",
+  "azure-storage-blob>=12.31.0,<13",
+  "opentelemetry-api>=1.45.1,<2",
+  "pikepdf>=10.17.0,<11",
+  "pydantic>=2.14.1,<3",
+  "sqlalchemy>=2.1.4,<3",
+  "lxml>=6.1.3,<7",
+  "tiktoken>=0.14.0,<1",
+  "nh3>=0.3.7,<1",
+  "azure-ai-documentintelligence>=1.0.2,<2",
+  "openai>=3.31.0,<4",
+  "unstructured[pdf]>=0.27.25,<1",
+  "opencv-python-headless>=5.0.0.93,<6",
+]
+
+# The only deptry ignore in the repository (01-repository.md section 3.3): the pinned Functions
+# worker and the headless OpenCV build are declared but never imported.
+[tool.deptry.per_rule_ignores]
+DEP002 = ["azure-functions-runtime", "opencv-python-headless"]

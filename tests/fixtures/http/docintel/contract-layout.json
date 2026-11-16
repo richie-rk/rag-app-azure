@@ -1,0 +1,72 @@
+[
+  {
+    "request": {
+      "method": "POST",
+      "path": "/documentintelligence/documentModels/prebuilt-layout:analyze"
+    },
+    "response": {
+      "status": 202,
+      "headers": {
+        "Operation-Location": "https://contract.cognitiveservices.azure.com/documentintelligence/documentModels/prebuilt-layout/analyzeResults/contract-1?api-version=2024-11-30"
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "GET",
+      "path": "/documentintelligence/documentModels/prebuilt-layout/analyzeResults/contract-1"
+    },
+    "response": {
+      "status": 200,
+      "json": {
+        "status": "succeeded",
+        "createdDateTime": "2026-11-01T00:00:00Z",
+        "lastUpdatedDateTime": "2026-11-01T00:00:02Z",
+        "analyzeResult": {
+          "apiVersion": "2024-11-30",
+          "modelId": "prebuilt-layout",
+          "stringIndexType": "unicodeCodePoint",
+          "contentFormat": "markdown",
+          "content": "# Section 1\n\nThe rules of section 1.\n\n<table>\n<tr><th>Item</th><th>Limit</th></tr>\n<tr><td>Meals</td><td>10</td></tr>\n</table>\n\n# Section 2\n\nThe rules of section 2.\n\n<table>\n<tr><th>Item</th><th>Limit</th></tr>\n<tr><td>Meals</td><td>20</td></tr>\n</table>\n\n",
+          "pages": [
+            {
+              "pageNumber": 1,
+              "angle": 0,
+              "width": 8.5,
+              "height": 11,
+              "unit": "inch",
+              "spans": [
+                {
+                  "offset": 0,
+                  "length": 128
+                }
+              ]
+            },
+            {
+              "pageNumber": 2,
+              "angle": 0,
+              "width": 8.5,
+              "height": 11,
+              "unit": "inch",
+              "spans": [
+                {
+                  "offset": 128,
+                  "length": 128
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "DELETE",
+      "path": "/documentintelligence/documentModels/prebuilt-layout/analyzeResults/contract-1"
+    },
+    "response": {
+      "status": 204
+    }
+  }
+]

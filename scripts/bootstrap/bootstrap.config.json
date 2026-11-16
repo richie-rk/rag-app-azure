@@ -1,0 +1,52 @@
+{
+  "tenantId": "",
+  "subscriptions": {
+    "dev": "",
+    "prod": "",
+    "load": ""
+  },
+  "location": "eastus2",
+  "github": {
+    "organization": "",
+    "repository": ""
+  },
+  "ciPrivateNetworking": false,
+  "ciNetworkLocation": "eastus2",
+  "operators": [],
+  "approverObjectIds": {
+    "dev": [],
+    "prod": [],
+    "load": []
+  },
+  "groupOwners": [],
+  "securityAlertEmails": [],
+  "testUserAliases": [
+    "admin",
+    "member",
+    "outsider",
+    "norole",
+    "load-01",
+    "load-02",
+    "load-03",
+    "load-04",
+    "load-05",
+    "load-06",
+    "load-07",
+    "load-08",
+    "load-09",
+    "load-10",
+    "load-11",
+    "load-12",
+    "load-13",
+    "load-14",
+    "load-15",
+    "load-16",
+    "load-17",
+    "load-18",
+    "load-19",
+    "load-20",
+    "load-admin"
+  ],
+  "allowedRoleAssigneePrincipalIds": [],
+  "templateCosmosAssignmentIds": []
+}

@@ -1,0 +1,43 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<</Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding>>
+endobj
+2 0 obj
+<</Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding>>
+endobj
+3 0 obj
+<</Type /Pages /Kids [4 0 R] /Count 1>>
+endobj
+4 0 obj
+<</Type /Page /Parent 3 0 R /MediaBox [0 0 612 792] /Resources <</Font <</F1 1 0 R /F2 2 0 R>> /ProcSet [/PDF /Text]>> /Contents 5 0 R>>
+endobj
+5 0 obj
+<</Length 289>>
+stream
+BT /F2 14 Tf 72 720 Td (Rendition schema fixture) Tj ET
+BT /F1 10.5 Tf 72 696 Td (The grey square below is an inline image whose dictionary) Tj ET
+BT /F1 10.5 Tf 72 681 Td (names a web address.) Tj ET
+q 24 0 0 24 72 600 cm
+BI /W 1 /H 1 /BPC 8 /CS /G /URL (https://example.net/x) ID Ä EI
+Q
+
+endstream
+endobj
+6 0 obj
+<</Type /Catalog /Pages 3 0 R>>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000110 00000 n 
+0000000210 00000 n 
+0000000265 00000 n 
+0000000417 00000 n 
+0000000755 00000 n 
+trailer
+<</Size 7 /Root 6 0 R /ID [<5E99AFE768AA0C5E5E87D9D8B03EDE7D> <5E99AFE768AA0C5E5E87D9D8B03EDE7D>]>>
+startxref
+802
+%%EOF

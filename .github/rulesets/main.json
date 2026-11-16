@@ -1,0 +1,68 @@
+{
+  "name": "main",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "required_linear_history"
+    },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "require_code_owner_review": true,
+        "dismiss_stale_reviews_on_push": true,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "lint", "integration_id": 15368 },
+          { "context": "python-tests", "integration_id": 15368 },
+          { "context": "web", "integration_id": 15368 },
+          { "context": "e2e", "integration_id": 15368 },
+          { "context": "contract", "integration_id": 15368 },
+          { "context": "migrations", "integration_id": 15368 },
+          { "context": "security", "integration_id": 15368 },
+          { "context": "images", "integration_id": 15368 },
+          { "context": "infra-validate", "integration_id": 15368 },
+          { "context": "preflight-whatif", "integration_id": 15368 },
+          { "context": "infra-tests", "integration_id": 15368 },
+          { "context": "analyze (python)", "integration_id": 15368 },
+          { "context": "analyze (javascript-typescript)", "integration_id": 15368 },
+          { "context": "analyze (actions)", "integration_id": 15368 }
+        ]
+      }
+    },
+    {
+      "type": "code_scanning",
+      "parameters": {
+        "code_scanning_tools": [
+          {
+            "tool": "CodeQL",
+            "security_alerts_threshold": "high_or_higher",
+            "alerts_threshold": "errors"
+          }
+        ]
+      }
+    }
+  ]
+}

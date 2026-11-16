@@ -1,0 +1,177 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "8e1f4a63-2b7c-4d95-a0e8-6c3d5f7b9a14",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.auth.validations\" | summarize n = sum(Sum) by outcome = tostring(Properties[\"outcome\"]), reason = tostring(Properties[\"reason\"]), bin(TimeGenerated, 15m)",
+        "size": 0,
+        "title": "Token validations by outcome and reason",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "token-validations"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.access.denials\" | summarize n = sum(Sum) by kind = tostring(Properties[\"kind\"]), operation = tostring(Properties[\"operation\"]) | order by n desc",
+        "size": 0,
+        "title": "Access denials by kind and operation",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "access-denials"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.auth.signing_key_age\", \"docchat.auth.signing_key_fetches\") | summarize value = max(Sum) by Name, bin(TimeGenerated, 15m)",
+        "size": 0,
+        "title": "Signing-key age and fetches",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "signing-keys"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"user_provisioned\" | summarize users = count() by bin(TimeGenerated, 1d)",
+        "size": 0,
+        "title": "Users provisioned per day",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "users-provisioned"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"index_override_used\" | summarize uses = count(), lastUse = max(TimeGenerated) by oid = tostring(Properties[\"oid\"]), projectId = tostring(Properties[\"projectId\"]), indexId = tostring(Properties[\"indexId\"]), expiresAt = tostring(Properties[\"expiresAt\"])",
+        "size": 0,
+        "title": "Index overrides in use",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "index-overrides"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppEvents | where TimeGenerated {TimeRange} and Name == \"admin_change\" | summarize changes = count() by action = tostring(Properties[\"action\"])",
+        "size": 0,
+        "title": "Admin changes by action",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "admin-changes"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name in (\"docchat.config.invalid\", \"docchat.opsconfig.refresh_failures\") | summarize n = sum(Sum) by Name, area = tostring(Properties[\"area\"]), key = tostring(Properties[\"key\"])",
+        "size": 0,
+        "title": "Ops-config health",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "ops-config-health"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

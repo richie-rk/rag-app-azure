@@ -1,0 +1,143 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "d09e8d15-8f29-5eef-afa9-7f94d6feb7c1",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                {
+                  "durationMs": 3600000
+                },
+                {
+                  "durationMs": 14400000
+                },
+                {
+                  "durationMs": 43200000
+                },
+                {
+                  "durationMs": 86400000
+                },
+                {
+                  "durationMs": 259200000
+                },
+                {
+                  "durationMs": 604800000
+                },
+                {
+                  "durationMs": 2592000000
+                }
+              ],
+              "allowCustom": true
+            }
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ratelimit.rejections\" | summarize rejections = sum(Sum) by reason = tostring(Properties[\"reason\"]), bin(TimeGenerated, 15m)",
+        "size": 0,
+        "title": "Rejections by reason",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "barchart"
+      },
+      "name": "rejections-by-reason"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let r = AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.ratelimit.rejections\" and tostring(Properties[\"reason\"]) in (\"rate\", \"concurrency\", \"quota_day\", \"quota_month\") | summarize rejected = sum(Sum) by bin(TimeGenerated, 1h); AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and Name == \"POST /v1/chat/turns\" | summarize requests = sum(ItemCount) by bin(TimeGenerated, 1h) | join kind=leftouter r on TimeGenerated | extend rejectedPct = round(100.0 * coalesce(rejected, 0.0) / requests, 2) | project TimeGenerated, rejectedPct",
+        "size": 0,
+        "title": "Rejection share of chat requests",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "rejection-share"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and ResultCode == \"429\" | summarize users = dcount(UserAuthenticatedId) by Name, bin(TimeGenerated, 1h)",
+        "size": 0,
+        "title": "Distinct users rejected per hour, by operation",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "linechart"
+      },
+      "name": "users-rejected"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests | where TimeGenerated {TimeRange} and AppRoleName == \"docchat-api\" and ResultCode == \"429\" | summarize responses = sum(ItemCount) by Name",
+        "size": 0,
+        "title": "Every 429 by operation",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "table"
+      },
+      "name": "every-429"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppMetrics | where TimeGenerated {TimeRange} and Name == \"docchat.usage.record_failures\" | summarize failures = sum(Sum)",
+        "size": 0,
+        "title": "Usage-recording failures",
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": [
+          "{workspaceId}"
+        ],
+        "visualization": "tiles"
+      },
+      "name": "usage-recording-failures"
+    }
+  ],
+  "fallbackResourceIds": [
+    "{workspaceId}"
+  ],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}

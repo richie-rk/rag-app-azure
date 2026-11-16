@@ -1,0 +1,12 @@
+.git
+.azure
+.env*
+**/node_modules
+**/tests
+!tests/support/pyproject.toml
+!tests/model-stub/pyproject.toml
+!tests/model-stub/src
+reports
+build
+dist
+load-results

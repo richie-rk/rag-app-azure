@@ -1,0 +1,36 @@
+requires:
+  PSRule: '>=2.9.0 <3.0.0'
+  PSRule.Rules.Azure: '>=1.47.0 <1.48.0'
+include:
+  module: [PSRule.Rules.Azure]
+# PSRule for Azure's binding applies only to its own rules; the custom rules, their selector and the
+# suppression groups in .ps-rule/ need the same one, or `type` and `name` never match a resource.
+binding:
+  preferTargetInfo: true
+  targetName: [ResourceName, name]
+  targetType: [ResourceType, type]
+# The baseline selects rules by tag, which would leave out the custom rules of .ps-rule/.
+rule:
+  includeLocal: true
+configuration:
+  AZURE_BICEP_FILE_EXPANSION: true
+  AZURE_BICEP_PARAMS_FILE_EXPANSION: true
+  AZURE_BICEP_FILE_EXPANSION_TIMEOUT: 60
+  AZURE_RESOURCE_GROUP: { name: 'rg-docchat-prod', location: 'eastus2' }
+input:
+  # main.bicep and shared.bicep have required parameters, so they expand only through their
+  # parameter files. A pattern also matches longer names, so the parameter files are re-included.
+  pathIgnore:
+    - 'infra/main.bicep'
+    - 'infra/shared.bicep'
+    - '!infra/*.bicepparam'
+    - 'infra/modules/**'
+    - 'infra/bootstrap/modules/**'
+    - 'infra/teardown/**'
+    - 'apps/**'
+    - 'tests/**'
+execution:
+  suppressionGroupExpired: Error
+  ruleSuppressed: Warn
+output:
+  culture: ['en-US']

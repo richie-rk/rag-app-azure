@@ -1,0 +1,7 @@
+{"type":"meta","sessionId":"4f9bae5c-6d7e-4f80-8192-a3b4c5d6e7f8","turnId":"5aacbf6d-7e8f-4091-92a3-b4c5d6e7f809","sessionCreated":true,"replayed":false,"correlationId":"9f8e7d6c5b4a39281706f5e4d3c2b1a0"}
+{"type":"delta","text":"Die Kosten für das Projekt betragen 12 € pro Nutzer ⟦1⟧. "}
+{"type":"delta","text":"Der Bericht nennt außerdem 中文 Quellen und Emojis 😀 𝄞 "}
+{"type":"delta","text":"sowie eine Übersicht auf https://docs.example/kosten ⟦2⟧."}
+{"type":"citations","citations":[{"number":1,"title":"Kostenplan 2026","pageNumber":4,"headingPath":["Überblick","Kosten €"],"contentType":"application/pdf","openAs":"pdf_page"},{"number":2,"title":"Übersicht","pageNumber":1,"headingPath":["Überblick","Kosten €"],"contentType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","openAs":"pdf_page"}],"allowedLinks":["https://docs.example/kosten"]}
+{"type":"followups","questions":["Was kostet ein Nutzer pro Jahr?","Welche Quellen gibt es?"]}
+{"type":"done","turnId":"5aacbf6d-7e8f-4091-92a3-b4c5d6e7f809","truncated":false,"usage":{"promptTokens":1830,"completionTokens":212,"reasoningTokens":0,"cachedTokens":1024,"totalTokens":2042,"estimated":false}}

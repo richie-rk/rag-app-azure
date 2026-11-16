@@ -1,0 +1,68 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<</Type /Page /Parent 7 0 R /MediaBox [0 0 612 792] /Resources <</Font <</F1 5 0 R /F2 6 0 R>> /ProcSet [/PDF /Text] /Properties <</oc1 2 0 R>>>> /Contents 8 0 R /StructParents 0>>
+endobj
+2 0 obj
+<</Type /OCG /Name (Layer 1)>>
+endobj
+3 0 obj
+<</Type /StructTreeRoot /K [4 0 R] /ParentTree <</Nums [0 [4 0 R]]>> /ParentTreeNextKey 1>>
+endobj
+4 0 obj
+<</Type /StructElem /S /P /P 3 0 R /Pg 1 0 R /K 0>>
+endobj
+5 0 obj
+<</Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding>>
+endobj
+6 0 obj
+<</Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding>>
+endobj
+7 0 obj
+<</Type /Pages /Kids [1 0 R] /Count 1>>
+endobj
+8 0 obj
+<</Length 753>>
+stream
+BT /F2 14 Tf 72 720 Td (Rendition schema fixture) Tj ET
+BT /F1 10.5 Tf 72 696 Td (The lines below are tagged: a paragraph with a language, a) Tj ET
+BT /F1 10.5 Tf 72 681 Td (number with replacement text, a figure with alternate text,) Tj ET
+BT /F1 10.5 Tf 72 666 Td (an abbreviation with its expansion and a line in a layer.) Tj ET
+/P << /MCID 0 /Lang (en-US) >> BDC
+BT /F1 10.5 Tf 72 620 Td (A tagged paragraph in English.) Tj ET
+EMC
+/Span << /ActualText (fifty) >> BDC
+BT /F1 10.5 Tf 72 600 Td (50) Tj ET
+EMC
+/Figure << /Alt (A grey square) >> BDC
+q 0.5 g 72 560 24 24 re f Q
+EMC
+/Span << /E (Document Intelligence) >> BDC
+BT /F1 10.5 Tf 72 540 Td (DI) Tj ET
+EMC
+/OC /oc1 BDC
+BT /F1 10.5 Tf 72 520 Td (A line in the optional-content layer.) Tj ET
+EMC
+
+endstream
+endobj
+9 0 obj
+<</Type /Catalog /Pages 7 0 R /MarkInfo <</Marked true>> /StructTreeRoot 3 0 R /Lang (en-US) /OCProperties <</OCGs [2 0 R] /D <</Order [2 0 R] /ON [2 0 R]>>>>>>
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000211 00000 n 
+0000000257 00000 n 
+0000000364 00000 n 
+0000000431 00000 n 
+0000000526 00000 n 
+0000000626 00000 n 
+0000000681 00000 n 
+0000001483 00000 n 
+trailer
+<</Size 10 /Root 9 0 R /ID [<67444ABDF02BC88BE7F9857128D7F596> <67444ABDF02BC88BE7F9857128D7F596>]>>
+startxref
+1659
+%%EOF

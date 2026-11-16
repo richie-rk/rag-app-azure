@@ -1,0 +1,70 @@
+# ADR 0055: Chat stream protocol over NDJSON
+
+- **Status:** Accepted
+- **Date:** 2026-10-18
+- **Decided by:** Product owner and architect
+- **Specified in:** 12-chat-pipeline.md, 11-api.md, 10-web-client.md, 84-testing.md, 85-observability.md
+- **Related ADRs:** 0004, 0007, 0012, 0013, 0056, 0057, 0058, 0059, 0060, 0064, 0065, 0070, 0072, 0085
+
+## Context
+
+- A chat answer streams to the browser as the model writes it. The product owner's requirement is NDJSON streaming with correct framing and an explicit end marker: `Content-Type: application/x-ndjson`; one UTF-8 JSON object per line ending in `\n`, with a `type` of `meta`, `status`, `delta`, `citations`, `followups`, `heartbeat`, `error` or `done`; the order `meta`, any `status`, the `delta` events, `citations`, any `followups`, `done`, with `heartbeat` anywhere; exactly one terminal event (`done` or `error`), whose absence is a failure the client shows; the client buffers bytes and parses complete lines only; a `heartbeat` after 15 s without output; no response compression; failures before streaming are HTTP errors, after it `error` events.
+- The stream must survive any network chunking, so a line or a multi-byte character split across reads is never lost. A cut connection must never look like a complete answer. Every failure must stay visible both to the user and to monitoring, including failures that happen after the `200` has gone out. The wire format must belong to the API alone, never to a model SDK, and must never carry retrieved text, prompts or model details to the browser.
+- Platform CORS can't expose response headers to scripts, so every value the client needs, the correlation ID included, travels in the body (ADR 0004).
+- Vendor facts (checked 2026-10-14):
+  - App Service ends a request on which the app sends nothing for about 240 s on Linux (230 s on Windows); the app-settings reference names a general idle timeout of 230 s.
+  - FastAPI's native JSON Lines streaming sends `Content-Type: application/jsonl`, hard-coded, and documents the stream with an OpenAPI 3.2 keyword inside a 3.1 document; `application/x-ndjson` needs Starlette's `StreamingResponse` with an explicit media type and events documented by hand.
+  - Azure OpenAI streaming reports usage only in a final chunk when `stream_options.include_usage` is set, and an interrupted stream may never deliver it; a filtered completion ends with `finish_reason` `content_filter` on its last chunk, and a filtered prompt is HTTP `400` with code `content_filter`.
+
+## Decision
+
+1. **Pre-stream boundary.** `createChatTurn` (`POST /v1/chat/turns`) sends `200` only after every check that can be decided up front has passed, in this order: the pre-body checks of the `/v1` route class `DocChatRoute` (token validation, the role check, first-sign-in provisioning; the route declares `route_options(body_limit=32768, burst_limited=False, write_limited=False)`, ADR 0012); the body size, at most 32,768 bytes; validation of `ChatTurnRequest`; the request rate; the token quota; the stream lease; project access; index resolution; the session and its project; duplicate detection and creation of the turn in state `streaming` (ADR 0056). Each failure is an RFC 9457 problem response (`application/problem+json`): `401` and `403` (the authentication codes), `404 project_not_found` and `session_not_found`, `409 project_index_unavailable`, `turn_in_progress`, `turn_already_ended`, `client_turn_id_conflict` and `session_turn_limit`, `413 request_too_large`, `422 validation_failed`, `429 rate_limited`, `too_many_streams` and `token_quota_exceeded` (with `retryAfterSeconds` and `Retry-After`), `503 authentication_unavailable` and `dependency_unavailable`. A lease taken before a later failure is released before the answer. So every `200` carries a turn ID, and every failure after it is an `error` event.
+2. **Framing and headers.** Each event is one JSON object written with Pydantic `model_dump_json(by_alias=True)` (compact, UTF-8, non-ASCII characters unescaped) followed by exactly one `\n` (0x0A); JSON string escaping keeps raw newlines out of every event; no blank lines and no byte-order mark. The route returns `StreamingResponse(media_type="application/x-ndjson")` with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, no `Content-Length` (chunked transfer) and never `Content-Encoding`: the app registers no compression middleware on this route, and a deployed test confirms that the platform adds none when the request sends `Accept-Encoding: gzip, br`.
+3. **The eight events** (`ChatStreamEvent`, discriminated by `type`; camelCase; every field always present, nullable fields sent as `null`):
+
+   | Event | Fields |
+   |---|---|
+   | `meta` | `sessionId` (UUID), `turnId` (UUID), `sessionCreated` (boolean), `replayed` (boolean), `correlationId` (the request's 32 lower-case hex trace ID, because cross-origin scripts can't read response headers) |
+   | `status` | `status`: `search_broadened` (the only value) |
+   | `delta` | `text`: 1 to 4,000 characters of answer text, which may hold API-minted citation tokens `⟦n⟧` with `n` 1 to 16 (ADR 0064) |
+   | `citations` | `citations`: 0 to 16 `Citation` (`number`, `title`, `pageNumber`, `headingPath`, `contentType`, `openAs`); `allowedLinks`: 0 to 50 `https` URLs of at most 2,048 characters |
+   | `followups` | `questions`: 1 to 3 strings of 1 to 200 characters |
+   | `heartbeat` | none beyond `type` |
+   | `error` | `code` (snake_case), `message` (the code's safe text, at most 300 characters), `retryable` (boolean), `retryAfterSeconds` (1 to 60, or `null`), `correlationId` |
+   | `done` | `turnId`, `truncated` (boolean), `usage` (`promptTokens`, `completionTokens`, `reasoningTokens`, `cachedTokens`, `totalTokens`, `estimated`) |
+
+   No event carries retrieved text, prompts, scores, deployment names, filter annotations or document, version or chunk IDs.
+4. **Order and one terminal event.** `meta` is always the first line; then at most one `status`, before any `delta`; zero or more `delta`; exactly one `citations` on success, written even when both arrays are empty; at most one `followups`; then `done`. `error` may follow `meta` at any point and ends the stream. `heartbeat` may appear anywhere after `meta` and before the terminal event, and nothing follows the terminal event. The stream writer enforces this state machine: an out-of-order write is a programming error, logged and, while no terminal event has been written, turned into `error` `internal_error`.
+5. **Heartbeat.** The writer reads events from an `asyncio.Queue` that the turn task feeds; whenever 15 seconds pass without a line, it writes `{"type":"heartbeat"}`, and the count restarts after every line, heartbeats included. The value is a protocol constant, not a setting.
+6. **Failures after `200`.** The stream-only codes, each registered in `docchat_core.errors.CODES` with no HTTP status: `conversation_unavailable`, `retrieval_unavailable`, `source_screening_unavailable`, `model_busy` (with `retryAfterSeconds`), `model_unavailable`, `answer_incomplete`, `turn_timeout`, `turn_save_failed` and `service_restarting` (`retryAfterSeconds` 5), all retryable; `prompt_too_large`, `question_filtered`, `answer_filtered` and `model_request_rejected`, not retryable; plus `internal_error` (retryable). Finish reasons map without exception: `stop` is normal; `length` with visible text ends with `done` and `truncated: true`; `length` with no visible text is `answer_incomplete`; `content_filter` is `answer_filtered`; a `400` with code `content_filter` is `question_filtered`; any other `400` is `model_request_rejected`. A failure is never answered with substitute text.
+7. **The persistence order behind the wire.** The turn is finalised as `completed` as soon as the model stream ends, before `citations` is written, so the session is free when the client sees the citations; a failed save ends the stream with `error` `turn_save_failed` and no `citations`. The wire order doesn't change. Disconnects (ADR 0057), the 180-second turn cap that ends with `turn_timeout` (ADR 0070), the shutdown drain that ends with `service_restarting` (ADR 0007) and the replay of a completed duplicate, which streams the stored turn in the same shape with `replayed: true` (ADR 0056), all keep the single terminal event.
+8. **Contract.** The OpenAPI document declares the `200` content `application/x-ndjson` with schema `ChatStreamEvent`, a `oneOf` over the eight event models discriminated by `type`, every model registered in `components.schemas` so that the web client generates its types and runtime validators from it (ADR 0013).
+9. **The web reader** (ADR 0085). The request sends `Accept: application/x-ndjson`; a `200` whose `Content-Type` doesn't start with `application/x-ndjson` is `stream_unreadable`. The reader splits the byte stream at 0x0A before decoding, decodes each complete line with a fatal UTF-8 `TextDecoder`, drops one trailing 0x0D, skips empty lines, parses with `JSON.parse` and validates the object against the generated schema of its `type`; an unknown `type` is skipped, so a newer API never breaks an older page. A line longer than 1,048,576 bytes, invalid UTF-8 or JSON, a known event failing its schema, or bytes left without a final 0x0A are `stream_unreadable`; a body that ends before a terminal event is `stream_incomplete`; 45,000 ms without a complete line, heartbeats included, is `stream_stalled`. Each turn's state machine (`awaitingMeta`, `answering`, `cited`, `done`, `failed`) refuses events out of order, and every turn ends in exactly one outcome, shown with the `error`'s message and `correlationId`, or the client's own text with `meta.correlationId`.
+10. **Telemetry.** `docchat.chat.turns` (counter by `outcome` and `error_code`), `docchat.chat.heartbeats`, `docchat.chat.disconnects` (by `phase`) and the `chat_turn_finished` log record count every outcome although the HTTP status is `200`; alert A07 `chat-failed-turns` (15-minute window, evaluated every 5 minutes, severity 2, runbook R07) fires when more than 5% of at least 20 turns failed.
+
+## Alternatives considered
+
+- **Server-sent events (`text/event-stream`).** The browser's `EventSource` can't send a bearer token or a `POST` body, so a hand-written reader would be needed anyway, and the product's protocol is NDJSON. Lost.
+- **FastAPI's built-in JSON Lines streaming.** It sends `application/jsonl`, not the protocol's media type, and its OpenAPI 3.2 keyword under a 3.1 document leaves generated client types untyped. Lost.
+- **WebSockets.** A second protocol through platform authentication and platform CORS, with its own reconnect rules, for a one-way stream. Lost.
+- **Relaying the model SDK's chunks.** The wire format would follow the SDK and API version, and filter annotations would reach the browser. Lost.
+- **`200` at once, with every failure as an `error` event.** Status-based monitoring would count every failure as a success, and a client would need a stream to learn of a `401` or a `429`. Lost.
+- **End of body as the end marker.** A cut connection would look like a complete answer. Lost.
+- **A configurable heartbeat.** A value above a third of the client's 45-second stall timer would stall slow answers; the constant keeps both sides in step. Lost.
+- **Compression.** A compressor buffers small lines and would hold heartbeats back, and the events are small. Lost.
+
+## Consequences
+
+- One reader and one state machine serve every turn, live or replayed; a split line, a split multi-byte character or a missing end marker can't corrupt an answer silently, and every turn ends in exactly one visible outcome.
+- Every failure that can be decided before streaming keeps a real HTTP status, so availability alerts see it; failures after `200` are counted by code.
+- Every event field is part of the API contract: a change ships through the OpenAPI document and the generated validators, and new event types are additive, because older pages skip them.
+- The App Service front end's and platform authentication's handling of long streams is documented only by the idle timeout, so a deployed test streams 200 s through both; the 15-second heartbeat keeps a slow answer far inside the 230-second limit.
+- Obligations: tests proving that the encoder writes one compact object per line with no raw newline even for `\n`, `\r`, U+2028 and emoji; that the state machine accepts the protocol's orders and `error` at every point and rejects anything after a terminal event, a `status` after a `delta` and anything before `meta`; that a fake clock yields a heartbeat after 15 s of silence; that each finish reason maps to its outcome; that a failure injected at each pipeline step after `200` ends with exactly one terminal event and the matching stored status; that a 40-second model pause yields heartbeats 15 s ± 1 s apart; that a 200-second model stream ends with `turn_timeout` at 180 s ± 2 s; that the headers hold and no `Content-Encoding` appears locally or through the platform; that a 200-second deployed stream passes uncut; that 100 concurrent streams run on one P1v3 instance; and the reader's tests over `tests/fixtures/streams/*.ndjson` (split lines, split multi-byte characters, a missing terminal event, unknown types).
+
+## References
+
+- App Service request time-outs: https://learn.microsoft.com/en-us/troubleshoot/azure/app-service/web-request-times-out-app-service (checked 2026-10-14)
+- App Service app settings reference (idle request timeout): https://learn.microsoft.com/en-us/azure/app-service/reference-app-settings (checked 2026-10-14)
+- FastAPI JSON Lines streaming: https://fastapi.tiangolo.com/tutorial/stream-json-lines/ (checked 2026-10-14)
+- Azure OpenAI Chat Completions REST reference (streaming, `stream_options.include_usage`): https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/chat (checked 2026-10-14)
+- Content filter behaviour (`finish_reason` `content_filter`, `400 content_filter`): https://learn.microsoft.com/en-us/azure/foundry-classic/foundry-models/concepts/content-filter (checked 2026-10-14)

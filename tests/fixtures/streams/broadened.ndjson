@@ -1,0 +1,6 @@
+{"type":"meta","sessionId":"4f9bae5c-6d7e-4f80-8192-a3b4c5d6e7f8","turnId":"5aacbf6d-7e8f-4091-92a3-b4c5d6e7f809","sessionCreated":false,"replayed":false,"correlationId":"9f8e7d6c5b4a39281706f5e4d3c2b1a0"}
+{"type":"heartbeat"}
+{"type":"status","status":"search_broadened"}
+{"type":"delta","text":"Nothing matched closely, so the search went wider: café ⟦1⟧."}
+{"type":"citations","citations":[{"number":1,"title":"Glossary","pageNumber":12,"headingPath":["Überblick","Kosten €"],"contentType":"application/pdf","openAs":"pdf_page"}],"allowedLinks":[]}
+{"type":"done","turnId":"5aacbf6d-7e8f-4091-92a3-b4c5d6e7f809","truncated":true,"usage":{"promptTokens":1830,"completionTokens":212,"reasoningTokens":0,"cachedTokens":1024,"totalTokens":2042,"estimated":false}}
